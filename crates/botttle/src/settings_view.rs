@@ -4,15 +4,21 @@
 //! change and redraws, so what you see is always what is on disk.
 
 use gpui::{
-    div, prelude::*, px, uniform_list, App, Context, EventEmitter, FocusHandle, Focusable, Hsla,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
+    div, img, prelude::*, px, uniform_list, App, Context, EventEmitter, FocusHandle, Focusable,
+    Hsla, IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
+    Window,
 };
 
-use crate::settings::{self, CursorShape, Settings, TabLayout, MAX_BLUR_RADIUS, MIN_OPACITY};
+use crate::assets;
+use crate::settings::{
+    self, CursorShape, IconStyle, Settings, TabLayout, MAX_BLUR_RADIUS, MIN_OPACITY,
+};
 use crate::theme::{self, Appearance, FontCatalog, Theme};
 
 /// Height of the scrollable font pickers.
 const FONT_LIST_HEIGHT: f32 = 190.0;
+/// Side of each app icon preview.
+const ICON_PREVIEW_SIZE: f32 = 48.0;
 
 pub enum SettingsViewEvent {
     Close,
@@ -127,6 +133,59 @@ impl SettingsView {
                 theme,
             ))
             .child(div().flex().flex_wrap().gap_2().children(cards))
+            .child(section_header(
+                "App Icon",
+                "Default follows the current theme; Bright stays fixed",
+                theme,
+            ))
+            .child(div().flex().gap_2().children(IconStyle::ALL.map(|style| {
+                let selected = settings.icon_style == style;
+                let previews: Vec<&'static str> = if style == IconStyle::Default {
+                    vec![assets::LOGO, assets::LOGO_TWILIGHT]
+                } else {
+                    vec![assets::logo_for(style, theme.appearance)]
+                };
+                div()
+                    .id(SharedString::from(format!("app-icon-{}", style.label())))
+                    .w(px(158.0))
+                    .h(px(104.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .rounded(Theme::radius())
+                    .border_1()
+                    .border_color(if selected {
+                        theme.border_focused
+                    } else {
+                        theme.border
+                    })
+                    .bg(if selected {
+                        theme.elevated
+                    } else {
+                        theme.surface
+                    })
+                    .hover(|element| element.border_color(theme.border_focused))
+                    .cursor_pointer()
+                    .child(
+                        div().flex().gap_2().children(
+                            previews
+                                .into_iter()
+                                // Rounded like the Dock draws it, so the preview
+                                // looks like the icon you will actually get.
+                                .map(|path| {
+                                    img(assets::embedded(path))
+                                        .size(px(ICON_PREVIEW_SIZE))
+                                        .rounded(px(ICON_PREVIEW_SIZE * 0.225))
+                                }),
+                        ),
+                    )
+                    .child(div().text_color(theme.text).child(style.label()))
+                    .on_click(move |_, _, cx| {
+                        Settings::update(cx, |settings| settings.icon_style = style);
+                    })
+            })))
             .child(section_header(
                 "Tabs",
                 "A strip across the top, or a sidebar down the left",

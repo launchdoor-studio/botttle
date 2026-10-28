@@ -49,6 +49,30 @@ pub enum TabLayout {
     Vertical,
 }
 
+/// Which app icon to show. Default follows the active theme: the twilight
+/// logo for dark themes, the bright one for light themes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IconStyle {
+    /// Also what a settings file from before the fixed twilight choice was
+    /// dropped reads as, rather than failing to load the whole file.
+    #[default]
+    #[serde(alias = "twilight")]
+    Default,
+    Bright,
+}
+
+impl IconStyle {
+    pub const ALL: [Self; 2] = [Self::Default, Self::Bright];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default · Dynamic",
+            Self::Bright => "Bright",
+        }
+    }
+}
+
 impl TabLayout {
     pub const ALL: [TabLayout; 2] = [Self::Horizontal, Self::Vertical];
 
@@ -65,6 +89,7 @@ impl TabLayout {
 pub struct Settings {
     /// A theme name from [`theme::all`], e.g. "Gruvbox Dark".
     pub theme: String,
+    pub icon_style: IconStyle,
     /// `None` means "pick the best monospace font installed".
     pub terminal_font_family: Option<String>,
     pub terminal_font_size: f32,
@@ -87,6 +112,8 @@ pub struct Settings {
     /// sitting on the more solid chrome ground. Only visible when `opacity` is
     /// below 1.
     pub glass_sidebar: bool,
+    /// Whether the tab sidebar is open. Only meaningful with the sidebar layout.
+    pub show_sidebar: bool,
     pub cursor_shape: CursorShape,
     /// Applies to panes opened from now on.
     pub scrollback_lines: usize,
@@ -104,6 +131,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: theme::DEFAULT_THEME.to_string(),
+            icon_style: IconStyle::Default,
             terminal_font_family: None,
             terminal_font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
@@ -116,6 +144,7 @@ impl Default for Settings {
             blur_radius: DEFAULT_BLUR_RADIUS,
             tab_layout: TabLayout::Horizontal,
             glass_sidebar: false,
+            show_sidebar: true,
             cursor_shape: CursorShape::Block,
             scrollback_lines: DEFAULT_SCROLLBACK,
             paste_images: true,
@@ -214,6 +243,7 @@ impl Settings {
         let settings = cx.global::<Settings>().clone();
         settings.save();
         theme::apply(&settings, cx);
+        crate::assets::apply_app_icon(settings.icon_style, cx.global::<theme::Theme>().appearance);
 
         // Transparency is a property of the window itself, not of anything we
         // paint, so every open window has to be told.
@@ -369,6 +399,15 @@ mod tests {
         assert_eq!(parsed.terminal_font_size, 15.0);
         assert_eq!(parsed.line_height, DEFAULT_LINE_HEIGHT);
         assert_eq!(parsed.tab_layout, TabLayout::Horizontal);
+    }
+
+    #[test]
+    fn a_stored_twilight_icon_reads_as_the_dynamic_default() {
+        let parsed: Settings =
+            serde_json::from_str(r#"{"icon_style": "twilight", "terminal_font_size": 15.0}"#)
+                .expect("parses");
+        assert_eq!(parsed.icon_style, IconStyle::Default);
+        assert_eq!(parsed.terminal_font_size, 15.0);
     }
 
     #[test]

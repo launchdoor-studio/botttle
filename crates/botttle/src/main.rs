@@ -43,6 +43,10 @@ fn main() {
     app.run(|cx: &mut App| {
         settings::init(cx);
         theme::init(cx);
+        assets::apply_app_icon(
+            cx.global::<Settings>().icon_style,
+            cx.global::<theme::Theme>().appearance,
+        );
         actions::init(cx);
 
         menus::init(cx);
@@ -51,6 +55,17 @@ fn main() {
         cx.on_action(|_: &actions::Hide, cx| cx.hide());
         cx.on_action(|_: &actions::HideOthers, cx| cx.hide_other_apps());
         cx.on_action(|_: &actions::ShowAll, cx| cx.unhide_other_apps());
+        cx.on_action(|_: &actions::ToggleSidebar, cx| {
+            Settings::update(cx, |settings| {
+                // From the top strip, asking for the sidebar means switching to it.
+                if settings.tab_layout == TabLayout::Horizontal {
+                    settings.tab_layout = TabLayout::Vertical;
+                    settings.show_sidebar = true;
+                } else {
+                    settings.show_sidebar = !settings.show_sidebar;
+                }
+            })
+        });
         cx.on_action(|_: &actions::ToggleTabLayout, cx| {
             Settings::update(cx, |settings| {
                 settings.tab_layout = match settings.tab_layout {

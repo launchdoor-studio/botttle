@@ -49,6 +49,7 @@ pub fn init(cx: &mut App) {
             name: "View".into(),
             items: vec![
                 MenuItem::action("Tabs in Sidebar", ToggleTabLayout),
+                MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::separator(),
                 MenuItem::action("Bigger", IncreaseFontSize),
                 MenuItem::action("Smaller", DecreaseFontSize),

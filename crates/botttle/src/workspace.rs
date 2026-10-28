@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
-    div, img, point, prelude::*, px, Axis, Context, Entity, EntityId, FocusHandle, Focusable,
+    div, img, point, prelude::*, px, svg, Axis, Context, Entity, EntityId, FocusHandle, Focusable,
     MouseButton, MouseDownEvent, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
     Subscription, Window,
 };
@@ -33,6 +33,19 @@ const TAB_BAR_HEIGHT: f32 = 36.0;
 const TAB_MIN_WIDTH: f32 = 110.0;
 const TAB_MAX_WIDTH: f32 = 240.0;
 const SIDEBAR_WIDTH: f32 = 220.0;
+const ICON_BUTTON_SIZE: f32 = 24.0;
+const ICON_SIZE: f32 = 14.0;
+const CLOSE_BUTTON_SIZE: f32 = 18.0;
+const CLOSE_ICON_SIZE: f32 = 11.0;
+/// Where the first button after the traffic lights starts, so the gap from
+/// the green light to the first icon matches the gap between icons.
+#[cfg(target_os = "macos")]
+const AFTER_TRAFFIC_LIGHTS: f32 = 81.0;
+#[cfg(not(target_os = "macos"))]
+const AFTER_TRAFFIC_LIGHTS: f32 = 10.0;
+/// The traffic lights' centre sits below the titlebar's, and the buttons
+/// beside them follow it rather than the bar. Measured, not derived.
+const TRAFFIC_LIGHT_NUDGE: f32 = 1.75;
 const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
 /// Wheel notches to pixels when translating vertical scroll into tab movement.
 const TAB_SCROLL_STEP: f32 = 40.0;
@@ -49,6 +62,8 @@ pub struct Workspace {
     /// Shown in the status bar; set when something failed in a way worth saying
     /// out loud, such as a shell that would not start.
     status: Option<SharedString>,
+    /// The sidebar row under the pointer, which shows its close button.
+    hovered_tab: Option<usize>,
 }
 
 struct Tab {
@@ -69,6 +84,7 @@ impl Workspace {
             tab_scroll: ScrollHandle::new(),
             settings_subscription: None,
             status: None,
+            hovered_tab: None,
         };
         workspace.open_tab(window, cx);
         workspace
@@ -302,7 +318,7 @@ impl Workspace {
 
     /// The window's own bar: traffic lights, the app name, and drag area. Kept
     /// separate from the tabs so the two rows can't be mistaken for each other.
-    fn render_titlebar(&self, theme: &Theme) -> impl IntoElement {
+    fn render_titlebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .items_center()
@@ -317,10 +333,12 @@ impl Workspace {
             .text_color(theme.text_muted)
             .gap_2()
             .child(
-                img(assets::LOGO)
-                    .size(px(LOGO_SIZE))
-                    .flex_none()
-                    .rounded(Theme::radius()),
+                img(assets::embedded(assets::logo_for(
+                    cx.global::<Settings>().icon_style,
+                    theme.appearance,
+                )))
+                .size(px(LOGO_SIZE))
+                .flex_none(),
             )
             .child("botttle")
             .on_mouse_down(MouseButton::Left, |event: &MouseDownEvent, window, _| {
@@ -469,6 +487,11 @@ impl Workspace {
     /// a mac sidebar has them. The sidebar's top is the window's only drag
     /// area in this layout; the panes run to the top edge.
     fn render_sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        // Everything drawn in the sidebar takes its own muted colour.
+        let theme = &Theme {
+            text_muted: theme.sidebar_text_muted,
+            ..theme.clone()
+        };
         let rows = self
             .tabs
             .iter()
@@ -494,6 +517,7 @@ impl Workspace {
                     .h(px(TITLEBAR_HEIGHT))
                     .pl(px(TITLEBAR_LEADING_PADDING))
                     .pr_2()
+                    .pt(px(TRAFFIC_LIGHT_NUDGE))
                     .on_mouse_down(MouseButton::Left, |event: &MouseDownEvent, window, _| {
                         if event.click_count == 2 {
                             window.zoom_window();
@@ -501,6 +525,7 @@ impl Workspace {
                             window.start_window_move();
                         }
                     })
+                    .child(sidebar_button(theme))
                     .child(new_tab_button(theme, cx)),
             )
             .child(
@@ -519,21 +544,38 @@ impl Workspace {
             )
             .child(
                 div()
-                    .id("sidebar-settings")
                     .flex()
                     .items_center()
                     .flex_none()
-                    .h(px(28.0))
-                    .px_3()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .text_size(px(11.0))
-                    .text_color(theme.text_muted)
-                    .hover(|style| style.text_color(theme.text))
-                    .cursor_pointer()
-                    .child("Settings")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+                    .h(px(TITLEBAR_HEIGHT))
+                    .px_2()
+                    .child(
+                        icon_button("sidebar-settings", assets::SETTINGS_ICON, theme).on_click(
+                            cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                        ),
+                    ),
             )
+    }
+
+    /// With the sidebar closed, the traffic lights still need somewhere to sit
+    /// and the window something to be dragged by, so a slim bar stays behind
+    /// holding just the button that brings the sidebar back.
+    fn render_collapsed_bar(&self, theme: &Theme) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .flex_none()
+            .h(px(TITLEBAR_HEIGHT))
+            .pl(px(AFTER_TRAFFIC_LIGHTS))
+            .pt(px(TRAFFIC_LIGHT_NUDGE))
+            .on_mouse_down(MouseButton::Left, |event: &MouseDownEvent, window, _| {
+                if event.click_count == 2 {
+                    window.zoom_window();
+                } else {
+                    window.start_window_move();
+                }
+            })
+            .child(sidebar_button(theme))
     }
 
     fn render_sidebar_row(
@@ -545,11 +587,12 @@ impl Workspace {
     ) -> impl IntoElement {
         let is_active = index == self.active_tab;
         let (title, dot, pane_count) = self.tab_summary(index, tab, theme, cx);
-        let group = SharedString::from(format!("sidebar-row-{index}"));
+        // Only the active row and the one under the pointer offer to close, so
+        // a long list of tabs doesn't read as a column of ×s.
+        let closable = is_active || self.hovered_tab == Some(index);
 
         div()
             .id(("sidebar-tab", index))
-            .group(group.clone())
             .flex()
             .flex_none()
             .items_center()
@@ -578,26 +621,53 @@ impl Workspace {
                     .hover(|style| style.bg(theme.elevated))
             })
             .on_click(cx.listener(move |this, _, window, cx| this.activate_tab(index, window, cx)))
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                let before = this.hovered_tab;
+                if *hovered {
+                    this.hovered_tab = Some(index);
+                } else if this.hovered_tab == Some(index) {
+                    this.hovered_tab = None;
+                }
+                if this.hovered_tab != before {
+                    cx.notify();
+                }
+            }))
             .child(
-                // Only the row under the pointer offers to close, so a long list
-                // of tabs doesn't read as a column of ×s.
+                // The slot is always there, so the title doesn't shift when the
+                // button comes and goes.
                 div()
                     .id(("close-sidebar-tab", index))
+                    .flex()
                     .flex_none()
-                    .px_1()
-                    .rounded(px(2.0))
-                    .text_color(gpui::transparent_black())
-                    .group_hover(group, |style| style.text_color(theme.text_muted))
-                    .hover(|style| style.text_color(theme.danger))
-                    .child("×")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        cx.stop_propagation();
-                        this.close_tab(index, window, cx);
-                    })),
+                    .items_center()
+                    .justify_center()
+                    .size(px(CLOSE_BUTTON_SIZE))
+                    .rounded(Theme::radius())
+                    .when(closable, |button| {
+                        button
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.border))
+                            .child(
+                                svg()
+                                    .path(assets::CLOSE_ICON)
+                                    .size(px(CLOSE_ICON_SIZE))
+                                    .text_color(icon_color(theme)),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(index, window, cx);
+                            }))
+                    }),
             )
     }
 
-    fn render_status_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Only there when it has something to say. On a mac the menu bar and the
+    /// sidebar already cover what it used to show, so it appears just to
+    /// report a failure; elsewhere it also carries the shortcut hint.
+    fn render_status_bar(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if self.status.is_none() && cfg!(target_os = "macos") {
+            return None;
+        }
         let panes = self
             .tabs
             .get(self.active_tab)
@@ -616,34 +686,36 @@ impl Workspace {
             )),
         };
 
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .h(px(24.0))
-            .px_3()
-            .bg(theme.surface)
-            .border_t_1()
-            .border_color(theme.border)
-            .text_size(px(11.0))
-            .child(left)
-            // On a mac the menu bar lists every command with its shortcut, so
-            // the status bar doesn't repeat them.
-            .when(!cfg!(target_os = "macos"), |element| {
-                element.child(
-                    div()
-                        .id("open-settings")
-                        .px_2()
-                        .rounded(px(2.0))
-                        .text_color(theme.text_muted)
-                        .hover(|style| style.text_color(theme.text))
-                        .cursor_pointer()
-                        .child(SharedString::from(SHORTCUT_HINT))
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
-                        ),
-                )
-            })
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .h(px(24.0))
+                .px_3()
+                .bg(theme.surface)
+                .border_t_1()
+                .border_color(theme.border)
+                .text_size(px(11.0))
+                .child(left)
+                // On a mac the menu bar lists every command with its shortcut, so
+                // the status bar doesn't repeat them.
+                .when(!cfg!(target_os = "macos"), |element| {
+                    element.child(
+                        div()
+                            .id("open-settings")
+                            .px_2()
+                            .rounded(px(2.0))
+                            .text_color(theme.text_muted)
+                            .hover(|style| style.text_color(theme.text))
+                            .cursor_pointer()
+                            .child(SharedString::from(SHORTCUT_HINT))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                            ),
+                    )
+                }),
+        )
     }
 }
 
@@ -657,6 +729,7 @@ impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.global::<Theme>().clone();
         let layout = cx.global::<Settings>().tab_layout;
+        let show_sidebar = cx.global::<Settings>().show_sidebar;
         let active = self.tabs.get(self.active_tab);
         let on_resize: ResizeHandler = Rc::new(cx.listener(|this, resize: &Resize, _, cx| {
             if let Some(tab) = this.tabs.get_mut(this.active_tab) {
@@ -674,7 +747,6 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_col()
-            .bg(theme.background)
             .text_color(theme.text)
             .text_size(theme.ui_font_size)
             .font_family(theme.ui_font_family.clone())
@@ -735,24 +807,33 @@ impl Render for Workspace {
             .on_action(|_: &Zoom, window, _| window.zoom_window())
             .map(|root| match layout {
                 TabLayout::Horizontal => root
-                    .child(self.render_titlebar(&theme))
+                    .bg(theme.background)
+                    .child(self.render_titlebar(&theme, cx))
                     .child(self.render_tab_bar(&theme, cx))
                     .child(content)
-                    .child(self.render_status_bar(&theme, cx)),
+                    .children(self.render_status_bar(&theme, cx)),
                 TabLayout::Vertical => root.child(
                     div()
                         .flex()
                         .flex_1()
                         .min_h_0()
-                        .child(self.render_sidebar(&theme, cx))
+                        .when(show_sidebar, |row| {
+                            row.child(self.render_sidebar(&theme, cx))
+                        })
                         .child(
+                            // The window ground goes behind the panes only, so a
+                            // glass sidebar isn't stacked on top of it.
                             div()
                                 .flex()
                                 .flex_col()
                                 .flex_1()
                                 .min_w_0()
+                                .bg(theme.background)
+                                .when(!show_sidebar, |column| {
+                                    column.child(self.render_collapsed_bar(&theme))
+                                })
                                 .child(content)
-                                .child(self.render_status_bar(&theme, cx)),
+                                .children(self.render_status_bar(&theme, cx)),
                         ),
                 ),
             })
@@ -760,20 +841,49 @@ impl Render for Workspace {
     }
 }
 
+/// Icons are line drawings, thinner than text, so the muted text colour that
+/// suits a label leaves them looking faded. They get most of the full one.
+fn icon_color(theme: &Theme) -> gpui::Hsla {
+    theme.text.opacity(0.8)
+}
+
+/// Shows or hides the tab sidebar.
+fn sidebar_button(theme: &Theme) -> impl IntoElement {
+    icon_button("toggle-sidebar", assets::SIDEBAR_ICON, theme)
+        .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleSidebar), cx))
+}
+
 fn new_tab_button(theme: &Theme, cx: &mut Context<Workspace>) -> impl IntoElement {
+    icon_button("new-tab", assets::PLUS_ICON, theme)
+        .on_click(cx.listener(|this, _, window, cx| this.open_tab(window, cx)))
+}
+
+/// A square titlebar button around a mask icon. Every such button shares one
+/// size and one icon size, so a row of them is evenly spaced by construction.
+fn icon_button(id: &'static str, icon: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     div()
-        .id("new-tab")
+        .id(id)
+        .group(id)
         .flex()
         .flex_none()
         .items_center()
         .justify_center()
-        .size(px(24.0))
+        .size(px(ICON_BUTTON_SIZE))
         .rounded(Theme::radius())
-        .text_color(theme.text_muted)
-        .hover(|style| style.bg(theme.elevated).text_color(theme.text))
+        .hover(|style| style.bg(theme.elevated))
         .cursor_pointer()
-        .child("+")
-        .on_click(cx.listener(|this, _, window, cx| this.open_tab(window, cx)))
+        .child(
+            // An svg takes no colour from its parent, so it is set here and
+            // brightened along with the button on hover.
+            svg()
+                .path(icon)
+                .size(px(ICON_SIZE))
+                .text_color(icon_color(theme))
+                .group_hover(id, |style| style.text_color(theme.text)),
+        )
+        // These buttons sit in the drag area; without this a click would also
+        // start moving the window.
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
 }
 
 const SHORTCUT_HINT: &str = "ctrl+shift T tab · D split · ] pane · , settings";

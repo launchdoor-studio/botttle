@@ -29,6 +29,7 @@ actions!(
         OpenSettings,
         CloseSettings,
         ToggleTabLayout,
+        ToggleSidebar,
         Minimize,
         Zoom,
         Hide,
@@ -67,6 +68,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(&format!("{MOD}--"), DecreaseFontSize, context),
         KeyBinding::new(&format!("{MOD}-0"), ResetFontSize, context),
         KeyBinding::new(&format!("{MOD}-,"), OpenSettings, context),
+        KeyBinding::new(&format!("{MOD}-b"), ToggleSidebar, context),
         KeyBinding::new("escape", CloseSettings, Some("Settings")),
         KeyBinding::new(&format!("{MOD}-q"), Quit, None),
     ];

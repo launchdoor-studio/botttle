@@ -78,6 +78,7 @@ should build — the platform-specific paths are there — but is untested.
 **Appearance**
 
 - 12 themes — six families in light and dark — swapped live.
+- App icon styles: Default follows the active light or dark theme; Bright stays fixed. The choice also updates the macOS Dock icon.
 - **Transparency and blur.** Dial the window's opacity down and the desktop shows
   through; turn on blur and macOS frosts what is behind it. Chrome stays more
   solid than the grid so tabs and status text hold up over anything.

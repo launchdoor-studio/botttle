@@ -49,13 +49,68 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$root/target/$profile/botttle" "$app/Contents/MacOS/botttle"
 
 # The icon: every size macOS asks for, from the one source image.
+#
+# This is what the Dock and Finder show while botttle isn't running, so it is
+# the twilight logo: what the default dynamic style picks for the default dark
+# theme, and what the running app shows out of the box. It is clipped to
+# Apple's icon grid the same way the running app clips it, so quitting doesn't
+# change the icon's shape either.
 iconset="$(mktemp -d)/botttle.iconset"
 mkdir -p "$iconset"
+icon_source="$(dirname "$iconset")/icon-source.png"
+swift - "$root/assets/logo-twilight.png" "$icon_source" <<'SWIFT'
+import AppKit
+
+let arguments = CommandLine.arguments
+guard let logo = NSImage(contentsOfFile: arguments[1]) else {
+  FileHandle.standardError.write("cannot read \(arguments[1])\n".data(using: .utf8)!)
+  exit(1)
+}
+// Apple's macOS icon grid: an 824-point rounded square centred on 1024.
+let canvas = 1024, inset = 100.0, side = 824.0, corner = 185.4
+let bitmap = NSBitmapImageRep(
+  bitmapDataPlanes: nil, pixelsWide: canvas, pixelsHigh: canvas,
+  bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+  colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+NSGraphicsContext.saveGraphicsState()
+NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+let shape = NSRect(x: inset, y: inset, width: side, height: side)
+NSBezierPath(roundedRect: shape, xRadius: corner, yRadius: corner).addClip()
+logo.draw(in: shape)
+NSGraphicsContext.restoreGraphicsState()
+try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: arguments[2]))
+SWIFT
 for size in 16 32 128 256 512; do
-  sips -Z "$size" "$root/assets/logo.png" --out "$iconset/icon_${size}x${size}.png" >/dev/null
-  sips -Z "$((size * 2))" "$root/assets/logo.png" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+  sips -Z "$size" "$icon_source" --out "$iconset/icon_${size}x${size}.png" >/dev/null
+  sips -Z "$((size * 2))" "$icon_source" --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
-iconutil -c icns "$iconset" -o "$app/Contents/Resources/botttle.icns"
+if ! iconutil -c icns "$iconset" -o "$app/Contents/Resources/botttle.icns"; then
+  # Some macOS installations reject even a complete, valid iconset. An ICNS
+  # file can also contain the PNGs directly; build that form without extra tools.
+  python3 - "$iconset" "$app/Contents/Resources/botttle.icns" <<'PY'
+import pathlib
+import struct
+import sys
+
+iconset = pathlib.Path(sys.argv[1])
+output = pathlib.Path(sys.argv[2])
+sizes = (
+    (b'icp4', 'icon_16x16.png'),
+    (b'icp5', 'icon_32x32.png'),
+    (b'icp6', 'icon_32x32@2x.png'),
+    (b'ic07', 'icon_128x128.png'),
+    (b'ic08', 'icon_256x256.png'),
+    (b'ic09', 'icon_512x512.png'),
+    (b'ic10', 'icon_512x512@2x.png'),
+)
+chunks = []
+for kind, filename in sizes:
+    png = (iconset / filename).read_bytes()
+    chunks.append(kind + struct.pack('>I', len(png) + 8) + png)
+payload = b''.join(chunks)
+output.write_bytes(b'icns' + struct.pack('>I', len(payload) + 8) + payload)
+PY
+fi
 rm -rf "$(dirname "$iconset")"
 
 cat > "$app/Contents/Info.plist" <<PLIST
