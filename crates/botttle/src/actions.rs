@@ -28,6 +28,12 @@ actions!(
         ResetFontSize,
         OpenSettings,
         CloseSettings,
+        ToggleTabLayout,
+        Minimize,
+        Zoom,
+        Hide,
+        HideOthers,
+        ShowAll,
         Quit,
     ]
 );
@@ -64,6 +70,14 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", CloseSettings, Some("Settings")),
         KeyBinding::new(&format!("{MOD}-q"), Quit, None),
     ];
+
+    // The mac's own window and app chords, which the menu bar lists.
+    #[cfg(target_os = "macos")]
+    bindings.extend([
+        KeyBinding::new("cmd-m", Minimize, context),
+        KeyBinding::new("cmd-h", Hide, None),
+        KeyBinding::new("alt-cmd-h", HideOthers, None),
+    ]);
 
     // Ctrl-Tab style tab cycling, for muscle memory carried over from editors.
     bindings.push(KeyBinding::new("ctrl-tab", NextTab, context));

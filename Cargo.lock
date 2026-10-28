@@ -688,6 +688,8 @@ dependencies = [
  "futures",
  "gpui",
  "libc",
+ "objc2",
+ "raw-window-handle",
  "serde",
  "serde_json",
 ]

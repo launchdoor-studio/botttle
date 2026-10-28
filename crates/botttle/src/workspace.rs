@@ -1,7 +1,9 @@
-//! The root view: the titlebar, the tab bar, the pane tree of the active tab,
-//! and the settings panel when it is open.
+//! The root view: the titlebar, the tabs (a strip across the top or a sidebar
+//! down the left), the pane tree of the active tab, and the settings panel when
+//! it is open.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use gpui::{
     div, img, point, prelude::*, px, Axis, Context, Entity, EntityId, FocusHandle, Focusable,
@@ -11,8 +13,8 @@ use gpui::{
 
 use crate::actions::*;
 use crate::assets;
-use crate::pane::{PaneGroup, RemoveResult};
-use crate::settings::Settings;
+use crate::pane::{PaneGroup, RemoveResult, Resize, ResizeHandler};
+use crate::settings::{Settings, TabLayout};
 use crate::settings_view::{SettingsView, SettingsViewEvent};
 use crate::terminal::view::{TerminalView, TerminalViewEvent};
 use crate::theme::Theme;
@@ -30,6 +32,8 @@ const TAB_BAR_HEIGHT: f32 = 36.0;
 /// Tabs keep their width instead of shrinking, so the strip scrolls once it fills.
 const TAB_MIN_WIDTH: f32 = 110.0;
 const TAB_MAX_WIDTH: f32 = 240.0;
+const SIDEBAR_WIDTH: f32 = 220.0;
+const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
 /// Wheel notches to pixels when translating vertical scroll into tab movement.
 const TAB_SCROLL_STEP: f32 = 40.0;
 
@@ -373,31 +377,18 @@ impl Workspace {
                     }))
                     .children(tabs),
             )
-            .child(
-                div()
-                    .id("new-tab")
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .size(px(24.0))
-                    .rounded(Theme::radius())
-                    .text_color(theme.text_muted)
-                    .hover(|style| style.bg(theme.elevated).text_color(theme.text))
-                    .cursor_pointer()
-                    .child("+")
-                    .on_click(cx.listener(|this, _, window, cx| this.open_tab(window, cx))),
-            )
+            .child(new_tab_button(theme, cx))
     }
 
-    fn render_tab(
+    /// What a tab shows wherever it is drawn: its focused pane's title, the
+    /// colour of its status dot, and how many panes it holds.
+    fn tab_summary(
         &self,
         index: usize,
         tab: &Tab,
         theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let is_active = index == self.active_tab;
+        cx: &Context<Self>,
+    ) -> (SharedString, gpui::Hsla, usize) {
         let panes = tab.group.panes();
         let focused_pane = panes
             .iter()
@@ -409,11 +400,23 @@ impl Workspace {
         let exited = focused_pane.is_some_and(|pane| pane.read(cx).has_exited());
         let dot = if exited {
             theme.danger
-        } else if is_active {
+        } else if index == self.active_tab {
             theme.accent
         } else {
             theme.text_muted
         };
+        (title, dot, panes.len())
+    }
+
+    fn render_tab(
+        &self,
+        index: usize,
+        tab: &Tab,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_active = index == self.active_tab;
+        let (title, dot, pane_count) = self.tab_summary(index, tab, theme, cx);
 
         div()
             .id(("tab", index))
@@ -428,12 +431,12 @@ impl Workspace {
             .rounded(Theme::radius())
             .cursor_pointer()
             .child(div().size(px(6.0)).flex_none().rounded(px(3.0)).bg(dot))
-            .when(panes.len() > 1, |element| {
+            .when(pane_count > 1, |element| {
                 element.child(
                     div()
                         .flex_none()
                         .text_color(theme.text_muted)
-                        .child(format!("{}", panes.len())),
+                        .child(format!("{pane_count}")),
                 )
             })
             .child(div().flex_1().min_w_0().truncate().child(title))
@@ -453,6 +456,138 @@ impl Workspace {
                     .px_1()
                     .rounded(px(2.0))
                     .text_color(theme.text_muted)
+                    .hover(|style| style.text_color(theme.danger))
+                    .child("×")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_tab(index, window, cx);
+                    })),
+            )
+    }
+
+    /// Tabs as a list down the left, with the traffic lights above it the way
+    /// a mac sidebar has them. The sidebar's top is the window's only drag
+    /// area in this layout; the panes run to the top edge.
+    fn render_sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| self.render_sidebar_row(index, tab, theme, cx))
+            .collect::<Vec<_>>();
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(SIDEBAR_WIDTH))
+            .h_full()
+            .bg(theme.sidebar)
+            .border_r_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .flex_none()
+                    .h(px(TITLEBAR_HEIGHT))
+                    .pl(px(TITLEBAR_LEADING_PADDING))
+                    .pr_2()
+                    .on_mouse_down(MouseButton::Left, |event: &MouseDownEvent, window, _| {
+                        if event.click_count == 2 {
+                            window.zoom_window();
+                        } else {
+                            window.start_window_move();
+                        }
+                    })
+                    .child(new_tab_button(theme, cx)),
+            )
+            .child(
+                div()
+                    .id("tab-list")
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .px_2()
+                    .py_1()
+                    .gap(px(2.0))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.tab_scroll)
+                    .children(rows),
+            )
+            .child(
+                div()
+                    .id("sidebar-settings")
+                    .flex()
+                    .items_center()
+                    .flex_none()
+                    .h(px(28.0))
+                    .px_3()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .text_size(px(11.0))
+                    .text_color(theme.text_muted)
+                    .hover(|style| style.text_color(theme.text))
+                    .cursor_pointer()
+                    .child("Settings")
+                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
+            )
+    }
+
+    fn render_sidebar_row(
+        &self,
+        index: usize,
+        tab: &Tab,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let is_active = index == self.active_tab;
+        let (title, dot, pane_count) = self.tab_summary(index, tab, theme, cx);
+        let group = SharedString::from(format!("sidebar-row-{index}"));
+
+        div()
+            .id(("sidebar-tab", index))
+            .group(group.clone())
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .h(px(SIDEBAR_ROW_HEIGHT))
+            .px_2()
+            .rounded(Theme::radius())
+            .cursor_pointer()
+            .child(div().size(px(6.0)).flex_none().rounded(px(3.0)).bg(dot))
+            .child(div().flex_1().min_w_0().truncate().child(title))
+            .when(pane_count > 1, |element| {
+                element.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(10.0))
+                        .text_color(theme.text_muted)
+                        .child(format!("{pane_count}")),
+                )
+            })
+            .when(is_active, |element| {
+                element.bg(theme.elevated).text_color(theme.text)
+            })
+            .when(!is_active, |element| {
+                element
+                    .text_color(theme.text_muted)
+                    .hover(|style| style.bg(theme.elevated))
+            })
+            .on_click(cx.listener(move |this, _, window, cx| this.activate_tab(index, window, cx)))
+            .child(
+                // Only the row under the pointer offers to close, so a long list
+                // of tabs doesn't read as a column of ×s.
+                div()
+                    .id(("close-sidebar-tab", index))
+                    .flex_none()
+                    .px_1()
+                    .rounded(px(2.0))
+                    .text_color(gpui::transparent_black())
+                    .group_hover(group, |style| style.text_color(theme.text_muted))
                     .hover(|style| style.text_color(theme.danger))
                     .child("×")
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -492,17 +627,23 @@ impl Workspace {
             .border_color(theme.border)
             .text_size(px(11.0))
             .child(left)
-            .child(
-                div()
-                    .id("open-settings")
-                    .px_2()
-                    .rounded(px(2.0))
-                    .text_color(theme.text_muted)
-                    .hover(|style| style.text_color(theme.text))
-                    .cursor_pointer()
-                    .child(SharedString::from(shortcut_hint()))
-                    .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx))),
-            )
+            // On a mac the menu bar lists every command with its shortcut, so
+            // the status bar doesn't repeat them.
+            .when(!cfg!(target_os = "macos"), |element| {
+                element.child(
+                    div()
+                        .id("open-settings")
+                        .px_2()
+                        .rounded(px(2.0))
+                        .text_color(theme.text_muted)
+                        .hover(|style| style.text_color(theme.text))
+                        .cursor_pointer()
+                        .child(SharedString::from(SHORTCUT_HINT))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                        ),
+                )
+            })
     }
 }
 
@@ -515,8 +656,16 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.global::<Theme>().clone();
+        let layout = cx.global::<Settings>().tab_layout;
         let active = self.tabs.get(self.active_tab);
-        let content = active.map(|tab| tab.group.render(Some(tab.active_pane), &theme));
+        let on_resize: ResizeHandler = Rc::new(cx.listener(|this, resize: &Resize, _, cx| {
+            if let Some(tab) = this.tabs.get_mut(this.active_tab) {
+                tab.group.resize(resize);
+                cx.notify();
+            }
+        }));
+        let content = active.map(|tab| tab.group.render(Some(tab.active_pane), &theme, &on_resize));
+        let content = div().flex().flex_1().min_h_0().p_2().children(content);
 
         div()
             .key_context(WORKSPACE_CONTEXT)
@@ -582,18 +731,49 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &CloseSettings, window, cx| this.close_settings(window, cx)),
             )
-            .child(self.render_titlebar(&theme))
-            .child(self.render_tab_bar(&theme, cx))
-            .child(div().flex().flex_1().min_h_0().p_2().children(content))
-            .child(self.render_status_bar(&theme, cx))
+            .on_action(|_: &Minimize, window, _| window.minimize_window())
+            .on_action(|_: &Zoom, window, _| window.zoom_window())
+            .map(|root| match layout {
+                TabLayout::Horizontal => root
+                    .child(self.render_titlebar(&theme))
+                    .child(self.render_tab_bar(&theme, cx))
+                    .child(content)
+                    .child(self.render_status_bar(&theme, cx)),
+                TabLayout::Vertical => root.child(
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.render_sidebar(&theme, cx))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_w_0()
+                                .child(content)
+                                .child(self.render_status_bar(&theme, cx)),
+                        ),
+                ),
+            })
             .children(self.settings.clone())
     }
 }
 
-fn shortcut_hint() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "⌘T tab · ⌘D split · ⌘] pane · ⌘, settings"
-    } else {
-        "ctrl+shift T tab · D split · ] pane · , settings"
-    }
+fn new_tab_button(theme: &Theme, cx: &mut Context<Workspace>) -> impl IntoElement {
+    div()
+        .id("new-tab")
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(px(24.0))
+        .rounded(Theme::radius())
+        .text_color(theme.text_muted)
+        .hover(|style| style.bg(theme.elevated).text_color(theme.text))
+        .cursor_pointer()
+        .child("+")
+        .on_click(cx.listener(|this, _, window, cx| this.open_tab(window, cx)))
 }
+
+const SHORTCUT_HINT: &str = "ctrl+shift T tab · D split · ] pane · , settings";

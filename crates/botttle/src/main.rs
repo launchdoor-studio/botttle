@@ -7,6 +7,8 @@
 
 mod actions;
 mod assets;
+mod glass;
+mod menus;
 mod pane;
 mod settings;
 mod settings_view;
@@ -20,7 +22,7 @@ use gpui::{
     WindowHandle, WindowOptions,
 };
 
-use crate::settings::Settings;
+use crate::settings::{Settings, TabLayout};
 use crate::workspace::Workspace;
 
 fn main() {
@@ -43,7 +45,20 @@ fn main() {
         theme::init(cx);
         actions::init(cx);
 
+        menus::init(cx);
+
         cx.on_action(|_: &actions::Quit, cx| cx.quit());
+        cx.on_action(|_: &actions::Hide, cx| cx.hide());
+        cx.on_action(|_: &actions::HideOthers, cx| cx.hide_other_apps());
+        cx.on_action(|_: &actions::ShowAll, cx| cx.unhide_other_apps());
+        cx.on_action(|_: &actions::ToggleTabLayout, cx| {
+            Settings::update(cx, |settings| {
+                settings.tab_layout = match settings.tab_layout {
+                    TabLayout::Horizontal => TabLayout::Vertical,
+                    TabLayout::Vertical => TabLayout::Horizontal,
+                }
+            })
+        });
         cx.on_action(|_: &actions::NewWindow, cx| {
             open_window(cx).expect("failed to open a botttle window");
         });
@@ -75,8 +90,10 @@ pub fn open_window(cx: &mut App) -> Result<WindowHandle<Workspace>> {
         |window, cx| cx.new(|cx| Workspace::new(window, cx)),
     )?;
 
+    let settings = cx.global::<Settings>().clone();
     window
         .update(cx, |workspace, window, cx| {
+            glass::apply(window, &settings);
             workspace.focus_active_pane(window, cx);
         })
         .ok();

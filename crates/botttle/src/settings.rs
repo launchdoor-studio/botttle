@@ -17,6 +17,8 @@ pub const DEFAULT_LINE_HEIGHT: f32 = 1.4;
 pub const DEFAULT_SCROLLBACK: usize = 10_000;
 /// Below this the text stops being readable over anything busy.
 pub const MIN_OPACITY: f32 = 0.3;
+pub const DEFAULT_BLUR_RADIUS: u32 = 20;
+pub const MAX_BLUR_RADIUS: u32 = 64;
 
 /// How the cursor is drawn in a focused terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +37,25 @@ impl CursorShape {
             Self::Block => "Block",
             Self::Bar => "Bar",
             Self::Underline => "Underline",
+        }
+    }
+}
+
+/// Where the tabs live: a strip across the top, or a sidebar down the left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TabLayout {
+    Horizontal,
+    Vertical,
+}
+
+impl TabLayout {
+    pub const ALL: [TabLayout; 2] = [Self::Horizontal, Self::Vertical];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Horizontal => "Top strip",
+            Self::Vertical => "Sidebar",
         }
     }
 }
@@ -59,6 +80,13 @@ pub struct Settings {
     pub opacity: f32,
     /// Blur whatever is behind the window. Only visible when `opacity` is below 1.
     pub blur: bool,
+    /// How far the blur spreads, in points. Higher reads as frostier glass.
+    pub blur_radius: u32,
+    pub tab_layout: TabLayout,
+    /// Let the sidebar show the blur through it as the panes do, rather than
+    /// sitting on the more solid chrome ground. Only visible when `opacity` is
+    /// below 1.
+    pub glass_sidebar: bool,
     pub cursor_shape: CursorShape,
     /// Applies to panes opened from now on.
     pub scrollback_lines: usize,
@@ -85,6 +113,9 @@ impl Default for Settings {
             background: None,
             opacity: 1.0,
             blur: false,
+            blur_radius: DEFAULT_BLUR_RADIUS,
+            tab_layout: TabLayout::Horizontal,
+            glass_sidebar: false,
             cursor_shape: CursorShape::Block,
             scrollback_lines: DEFAULT_SCROLLBACK,
             paste_images: true,
@@ -150,13 +181,25 @@ impl Settings {
     /// What the platform is told to do behind the window. An opaque window gets
     /// `Opaque` whatever the blur setting says, because there is nothing to see
     /// through — and telling the compositor so saves it drawing what is behind.
+    ///
+    /// On macOS the blur is ours rather than GPUI's (see [`crate::glass`]), so
+    /// the window is only ever asked to be see-through.
     pub fn window_background(&self) -> WindowBackgroundAppearance {
         if !self.is_translucent() {
             WindowBackgroundAppearance::Opaque
-        } else if self.blur {
+        } else if self.blur && !cfg!(target_os = "macos") {
             WindowBackgroundAppearance::Blurred
         } else {
             WindowBackgroundAppearance::Transparent
+        }
+    }
+
+    /// The blur to put behind the window, or 0 for none.
+    pub fn blur_radius(&self) -> u32 {
+        if self.is_translucent() && self.blur {
+            self.blur_radius.clamp(1, MAX_BLUR_RADIUS)
+        } else {
+            0
         }
     }
 
@@ -183,7 +226,8 @@ impl Settings {
             for window in cx.windows() {
                 if window
                     .update(cx, |_, window, _| {
-                        window.set_background_appearance(background)
+                        window.set_background_appearance(background);
+                        crate::glass::apply(window, &settings);
                     })
                     .is_err()
                 {
@@ -273,19 +317,34 @@ mod tests {
             blur: true,
             ..Settings::default()
         };
-        assert!(matches!(
-            blurred.window_background(),
-            WindowBackgroundAppearance::Blurred
-        ));
+        assert_eq!(blurred.blur_radius(), DEFAULT_BLUR_RADIUS);
 
         let plain = Settings {
             blur: false,
-            ..blurred
+            ..blurred.clone()
         };
+        assert_eq!(plain.blur_radius(), 0);
         assert!(matches!(
             plain.window_background(),
             WindowBackgroundAppearance::Transparent
         ));
+
+        let opaque = Settings {
+            opacity: 1.0,
+            ..blurred
+        };
+        assert_eq!(opaque.blur_radius(), 0);
+    }
+
+    #[test]
+    fn blur_radius_is_clamped() {
+        let settings = Settings {
+            opacity: 0.8,
+            blur: true,
+            blur_radius: 500,
+            ..Settings::default()
+        };
+        assert_eq!(settings.blur_radius(), MAX_BLUR_RADIUS);
     }
 
     #[test]
@@ -309,5 +368,13 @@ mod tests {
             serde_json::from_str(r#"{"terminal_font_size": 15.0}"#).expect("parses");
         assert_eq!(parsed.terminal_font_size, 15.0);
         assert_eq!(parsed.line_height, DEFAULT_LINE_HEIGHT);
+        assert_eq!(parsed.tab_layout, TabLayout::Horizontal);
+    }
+
+    #[test]
+    fn tab_layout_is_stored_by_name() {
+        let parsed: Settings =
+            serde_json::from_str(r#"{"tab_layout": "vertical"}"#).expect("parses");
+        assert_eq!(parsed.tab_layout, TabLayout::Vertical);
     }
 }

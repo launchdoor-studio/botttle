@@ -16,6 +16,8 @@ pub const DEFAULT_THEME: &str = "Botttle Dark";
 
 /// One corner radius for the whole app. Kept small on purpose.
 pub const RADIUS: f32 = 4.0;
+/// How much of the surface colour a glass sidebar keeps, relative to opacity.
+const GLASS_SIDEBAR_TINT: f32 = 0.35;
 
 /// Monospace families we look for, in order, when the user hasn't chosen one.
 const FONT_CANDIDATES: &[&str] = &[
@@ -80,6 +82,9 @@ pub struct Theme {
     pub background: Hsla,
     pub surface: Hsla,
     pub elevated: Hsla,
+    /// The tab sidebar's ground: the chrome surface, or a light tint of it
+    /// when the sidebar is glass.
+    pub sidebar: Hsla,
     pub border: Hsla,
     pub border_focused: Hsla,
     pub text: Hsla,
@@ -133,6 +138,7 @@ impl Theme {
             background: color(palette.background),
             surface: color(palette.surface),
             elevated: color(palette.elevated),
+            sidebar: color(palette.surface),
             border: color(palette.border),
             border_focused: color(palette.border_focused),
             text: color(palette.text),
@@ -171,6 +177,13 @@ impl Theme {
             theme.background = theme.background.alpha(opacity);
             theme.surface = theme.surface.alpha(chrome);
             theme.elevated = theme.elevated.alpha(chrome);
+            // Glass keeps only a tint of the surface, enough to set the sidebar
+            // apart from the panes without hiding the blur behind it.
+            theme.sidebar = if settings.glass_sidebar {
+                theme.surface.alpha(opacity * GLASS_SIDEBAR_TINT)
+            } else {
+                theme.surface
+            };
             // The window ground already carries the alpha, so the pane adds none.
             theme.pane_background = theme.terminal_background.alpha(0.0);
         }

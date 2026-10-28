@@ -8,7 +8,7 @@ use gpui::{
     IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
 };
 
-use crate::settings::{self, CursorShape, Settings, MIN_OPACITY};
+use crate::settings::{self, CursorShape, Settings, TabLayout, MAX_BLUR_RADIUS, MIN_OPACITY};
 use crate::theme::{self, Appearance, FontCatalog, Theme};
 
 /// Height of the scrollable font pickers.
@@ -128,6 +128,47 @@ impl SettingsView {
             ))
             .child(div().flex().flex_wrap().gap_2().children(cards))
             .child(section_header(
+                "Tabs",
+                "A strip across the top, or a sidebar down the left",
+                theme,
+            ))
+            .child(div().flex().gap_2().children(TabLayout::ALL.map(|layout| {
+                chip(
+                    SharedString::from(format!("tabs-{}", layout.label())),
+                    layout.label(),
+                    settings.tab_layout == layout,
+                    theme,
+                    move |_, _, cx| Settings::update(cx, |settings| settings.tab_layout = layout),
+                )
+            })))
+            .when(settings.tab_layout == TabLayout::Vertical, |element| {
+                element.child(
+                    div()
+                        .flex()
+                        .gap_4()
+                        .items_center()
+                        .child(chip(
+                            "chip-glass-sidebar",
+                            "Glass sidebar",
+                            settings.glass_sidebar,
+                            theme,
+                            |_, _, cx| {
+                                Settings::update(cx, |settings| {
+                                    settings.glass_sidebar = !settings.glass_sidebar
+                                })
+                            },
+                        ))
+                        .when(!settings.is_translucent(), |element| {
+                            element.child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_muted)
+                                    .child("Glass applies once opacity is below 100%"),
+                            )
+                        }),
+                )
+            })
+            .child(section_header(
                 "Transparency",
                 "How much of the desktop shows through the window",
                 theme,
@@ -161,6 +202,26 @@ impl SettingsView {
                         theme,
                         |_, _, cx| Settings::update(cx, |settings| settings.blur = !settings.blur),
                     ))
+                    .when(settings.blur, |element| {
+                        element.child(stepper(
+                            "blur-radius",
+                            "Blur",
+                            settings.blur_radius.min(MAX_BLUR_RADIUS).to_string(),
+                            theme,
+                            |cx| {
+                                Settings::update(cx, |settings| {
+                                    settings.blur_radius =
+                                        settings.blur_radius.saturating_sub(4).max(4)
+                                })
+                            },
+                            |cx| {
+                                Settings::update(cx, |settings| {
+                                    settings.blur_radius =
+                                        (settings.blur_radius + 4).min(MAX_BLUR_RADIUS)
+                                })
+                            },
+                        ))
+                    })
                     .when(!settings.is_translucent(), |element| {
                         element.child(
                             div()
