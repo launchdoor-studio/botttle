@@ -20,7 +20,7 @@ use futures::StreamExt;
 use gpui::{
     canvas, div, font, prelude::*, px, App, Bounds, ClipboardEntry, ClipboardItem, Context, Entity,
     EventEmitter, ExternalPaths, FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight,
-    HighlightStyle, Image, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton,
+    HighlightStyle, Hsla, Image, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render, ScrollDelta,
     ScrollWheelEvent, SharedString, StrikethroughStyle, StyledText, Task, TouchPhase,
     UnderlineStyle, Window,
@@ -763,7 +763,12 @@ impl TerminalView {
                     fade_out: None,
                 };
 
-                rows[row_index as usize].push(cell.c, style);
+                let width = if cell.flags.contains(Flags::WIDE_CHAR) {
+                    2
+                } else {
+                    1
+                };
+                rows[row_index as usize].push(cell.c, style, width);
             }
 
             let cursor = (cursor_visible
@@ -931,11 +936,13 @@ impl Render for TerminalView {
                 element.cursor_pointer()
             });
 
+        let text_style = root.text_style().get_or_insert_with(Default::default);
         if !theme.ligatures {
-            root.text_style()
-                .get_or_insert_with(Default::default)
-                .font_features = Some(FontFeatures::disable_ligatures());
+            text_style.font_features = Some(FontFeatures::disable_ligatures());
         }
+        // Prompt and editor icons live in Nerd Fonts; when the terminal font
+        // lacks one, it is drawn from an installed Nerd Font, not as a box.
+        text_style.font_fallbacks = theme.font_fallbacks.clone();
 
         root.child(
             div()
@@ -957,9 +964,25 @@ impl Render for TerminalView {
                     .size_full(),
                 )
                 .children(grid.rows.into_iter().map(|row| {
+                    // A row never wraps: anything that doesn't fit is cut off
+                    // at the edge rather than drawn over the row below.
                     div()
+                        .flex()
                         .h(line_height)
-                        .child(StyledText::new(row.text).with_highlights(row.highlights))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .children(row.segments.into_iter().map(|segment| {
+                            div()
+                                .flex_none()
+                                .w(cell_width * segment.columns as f32)
+                                .when_some(segment.background, |element, background| {
+                                    element.bg(background)
+                                })
+                                .child(
+                                    StyledText::new(segment.text)
+                                        .with_highlights(segment.highlights),
+                                )
+                        }))
                 }))
                 .children(cursor)
                 .children(scrollbar),
@@ -980,30 +1003,69 @@ struct Grid {
     cursor: Option<CursorPlacement>,
 }
 
-/// One rendered row: the text plus the styles that apply to byte ranges of it.
+/// One rendered row, as segments laid side by side.
 struct Row {
+    segments: Vec<Segment>,
+}
+
+/// A stretch of a row drawn as one piece of text in a box exactly `columns`
+/// cells wide. The box, not the font, decides where the next segment starts,
+/// so a glyph wider than a cell can't push the rest of the row out of line.
+struct Segment {
     text: SharedString,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
+    columns: usize,
+    /// Painted on the box, for segments whose glyphs may not fill their cells.
+    background: Option<Hsla>,
+}
+
+/// What kind of characters a segment holds. ASCII comes from the terminal
+/// font and is exactly one cell per character, so long runs of it can be laid
+/// out as plain text. Anything else — symbols, icons, box drawing, CJK — may
+/// come from a fallback font with its own advance, so it gets boxes of its
+/// own, one per run of the same style and width.
+#[derive(Clone, Copy, PartialEq)]
+enum SegmentKind {
+    Ascii,
+    Other { style: HighlightStyle, width: usize },
 }
 
 /// Accumulates cells into a row, merging neighbours that share a style so the
 /// text system sees as few runs as possible.
 struct RowBuilder {
+    segments: Vec<Segment>,
+    kind: SegmentKind,
     text: String,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     current: Option<(usize, HighlightStyle)>,
+    columns: usize,
 }
 
 impl RowBuilder {
     fn new(columns: usize) -> Self {
         Self {
+            segments: Vec::new(),
+            kind: SegmentKind::Ascii,
             text: String::with_capacity(columns),
             highlights: Vec::new(),
             current: None,
+            columns: 0,
         }
     }
 
-    fn push(&mut self, c: char, style: HighlightStyle) {
+    /// Adds one cell. `width` is 2 for a wide character, whose spacer cell is
+    /// never pushed.
+    fn push(&mut self, c: char, style: HighlightStyle, width: usize) {
+        let kind = if c.is_ascii() {
+            SegmentKind::Ascii
+        } else {
+            SegmentKind::Other { style, width }
+        };
+        if kind != self.kind {
+            self.flush();
+            self.kind = kind;
+        }
+
         let offset = self.text.len();
         match &self.current {
             Some((_, current)) if *current == style => {}
@@ -1014,15 +1076,38 @@ impl RowBuilder {
             None => self.current = Some((offset, style)),
         }
         self.text.push(c);
+        self.columns += width;
     }
 
-    fn finish(mut self) -> Row {
+    fn flush(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
         if let Some((start, style)) = self.current.take() {
             self.highlights.push((start..self.text.len(), style));
         }
+
+        // A fallback glyph can be narrower than its cells, so the background
+        // goes on the box rather than behind the glyph.
+        let mut background = None;
+        if let SegmentKind::Other { .. } = self.kind {
+            for (_, style) in &mut self.highlights {
+                background = style.background_color.take().or(background);
+            }
+        }
+
+        self.segments.push(Segment {
+            text: SharedString::from(std::mem::take(&mut self.text)),
+            highlights: std::mem::take(&mut self.highlights),
+            columns: std::mem::take(&mut self.columns),
+            background,
+        });
+    }
+
+    fn finish(mut self) -> Row {
+        self.flush();
         Row {
-            text: SharedString::from(self.text),
-            highlights: self.highlights,
+            segments: self.segments,
         }
     }
 }
@@ -1119,4 +1204,56 @@ fn open(target: Target, cx: &mut App) {
             }
         })
         .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build(cells: &[(char, usize)]) -> Row {
+        let mut row = RowBuilder::new(cells.len());
+        for &(c, width) in cells {
+            row.push(c, HighlightStyle::default(), width);
+        }
+        row.finish()
+    }
+
+    fn layout(row: &Row) -> Vec<(&str, usize)> {
+        row.segments
+            .iter()
+            .map(|segment| (segment.text.as_ref(), segment.columns))
+            .collect()
+    }
+
+    #[test]
+    fn symbols_get_boxes_of_their_own_so_the_text_after_them_stays_in_its_columns() {
+        let cells: Vec<(char, usize)> = "~ on \u{e0a0} main \u{276f} ls"
+            .chars()
+            .map(|c| (c, 1))
+            .collect();
+        assert_eq!(
+            layout(&build(&cells)),
+            vec![
+                ("~ on ", 5),
+                ("\u{e0a0}", 1),
+                (" main ", 6),
+                ("\u{276f}", 1),
+                (" ls", 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_wide_character_takes_two_columns() {
+        assert_eq!(
+            layout(&build(&[('a', 1), ('漢', 2), ('字', 2), ('b', 1)])),
+            vec![("a", 1), ("漢字", 4), ("b", 1)]
+        );
+    }
+
+    #[test]
+    fn a_plain_row_is_a_single_segment() {
+        let cells: Vec<(char, usize)> = "total 1824".chars().map(|c| (c, 1)).collect();
+        assert_eq!(layout(&build(&cells)), vec![("total 1824", 10)]);
+    }
 }

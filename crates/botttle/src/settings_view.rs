@@ -656,6 +656,9 @@ impl Render for SettingsView {
             .track_focus(&self.focus_handle)
             .absolute()
             .inset_0()
+            // The panel is modal: wheel and clicks stop here instead of also
+            // scrolling or selecting in the terminal underneath.
+            .occlude()
             .flex()
             .items_center()
             .justify_center()

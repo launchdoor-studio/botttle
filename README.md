@@ -47,16 +47,31 @@ should build — the platform-specific paths are there — but is untested.
 
 - Real PTYs, a full ANSI emulator ([`alacritty_terminal`](https://github.com/alacritty/alacritty)),
   24-bit color, text attributes, and configurable scrollback.
-- Mouse selection — click, double-click for words, triple-click for lines — with
-  copy, paste, and wheel scrollback.
+- Your login shell — the one set on your account, so a `chsh` to fish or
+  anything else takes effect in the next pane, not the next macOS login.
+- **Scrolling that reaches every program.** Wheel and trackpad move through the
+  scrollback, smoothly. Programs that track the mouse get the wheel as mouse
+  events, and full-screen ones like `less` and `vim` get it as arrow keys;
+  `shift` always scrolls botttle's own history. `shift-pageup` / `pagedown` /
+  `home` / `end` page through it, and a thumb shows where you are.
+- Mouse selection — click, double-click for words, triple-click for lines.
+  **Selecting copies**, no `⌘C` needed (it can be turned off).
+- Every character keeps to its cell. Symbols and icons from a fallback font
+  can't push the rest of a row out of line, and icons the terminal font lacks
+  are drawn from an installed Nerd Font, so Starship and similar prompts work
+  without switching fonts.
 - Window title tracking (OSC 0/2), clipboard escapes (OSC 52), and color queries.
 - Block, bar, and underline cursors; a hollow cursor in unfocused panes.
 
 **Workspace**
 
-- Tabs, each holding its own pane layout, in a bar that scrolls horizontally once
-  they fill it.
-- Splits to any depth. Splitting along an axis a pane already occupies adds a
+- Tabs, each holding its own pane layout, in a strip across the top or a
+  collapsible sidebar down the left.
+- **Rename a tab** by double-clicking it, `⌘⇧R`, or File → Rename Tab… . A
+  name sticks however the program retitles the pane; clear it to go back.
+- Multiple windows from `⌘N`, File → New Window, or the Dock icon's menu. Each
+  new one steps out from the last instead of landing on top of it.
+- Splits to any depth, with gutters you drag to resize. Splitting along an axis a pane already occupies adds a
   sibling instead of nesting, so repeated splits stay flat.
 - New tabs and splits open in the current pane's working directory, read from the
   PTY's foreground process group.
@@ -73,7 +88,8 @@ should build — the platform-specific paths are there — but is untested.
   flow both CLIs document for attaching an image that is already on disk.
 - **`⌘-click` opens a URL or a path.** Holding `⌘` underlines the target first.
   Paths resolve against the pane's working directory, and a `file.rs:42:9`
-  position suffix opens the file.
+  position suffix opens the file. Links programs attach behind their text
+  (OSC 8) — Claude Code, `ls --hyperlink`, `gh`, `delta` — open too.
 
 **Appearance**
 
@@ -85,8 +101,8 @@ should build — the platform-specific paths are there — but is untested.
 - A settings screen for fonts, sizes, line height, ligatures, cursor, and
   background, persisted as plain JSON.
 
-Not there yet: IME composition, drag-to-resize splits, search, the kitty keyboard
-protocol, and the agent layer itself.
+Not there yet: IME composition, search, the kitty keyboard protocol, and the
+agent layer itself.
 
 ## Installation
 
@@ -140,6 +156,7 @@ or X11 development packages.
 | `⌘T` | New tab |
 | `⌘W` | Close pane — closes the tab with the last pane |
 | `⌘⇧W` | Close tab |
+| `⌘⇧R` / double-click a tab | Rename tab — `enter` keeps it, `esc` cancels |
 | `⌘D` / `⌘⇧D` | Split right / split down |
 | `⌘]` / `⌘[` | Focus next / previous pane |
 | `⌘⇧]` / `⌘⇧[` | Next / previous tab |
@@ -149,11 +166,16 @@ or X11 development packages.
 | drag & drop | Type the dropped files' paths at the prompt |
 | `shift-enter` | Newline instead of send |
 | `⌘-click` | Open the URL or path under the pointer |
+| `⇧PageUp` / `⇧PageDown` | Scroll back / forward a page |
+| `⇧Home` / `⇧End` | Top / bottom of the scrollback |
+| `⇧`-scroll | Scroll the scrollback even when a program has the mouse |
 | `⌘K` | Clear |
 | `⌘=` / `⌘-` / `⌘0` | Font size |
+| `⌘B` | Show / hide the tab sidebar |
 | `⌘,` | Settings — `esc` closes |
 
-Apart from `ctrl-tab`, every other key reaches the program untouched — `ctrl-c`,
+Apart from `ctrl-tab` and the `shift`-scrolling keys outside full-screen
+programs, every other key reaches the program untouched — `ctrl-c`,
 `ctrl-d`, `ctrl-z` and friends included.
 
 ## Configuration
@@ -165,6 +187,7 @@ hand — unknown and missing keys fall back to defaults.
 | Key | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `theme` | string | `"Botttle Dark"` | Any name from [Themes](#themes) |
+| `icon_style` | `"default"` \| `"bright"` | `"default"` | Default follows the theme's light or dark |
 | `terminal_font_family` | string \| null | `null` | `null` picks the best monospace font installed |
 | `terminal_font_size` | number | `13.0` | 6–40 |
 | `line_height` | number | `1.4` | Multiple of the font size, 1.0–2.5 |
@@ -174,10 +197,15 @@ hand — unknown and missing keys fall back to defaults.
 | `background` | string \| null | `null` | `"#rrggbb"` override for the window and terminal grounds |
 | `opacity` | number | `1.0` | 0.3–1.0; below 1 the desktop shows through |
 | `blur` | bool | `false` | Frost what is behind the window; needs `opacity` below 1 |
+| `blur_radius` | number | `20` | 1–64 points |
+| `tab_layout` | `"horizontal"` \| `"vertical"` | `"horizontal"` | Strip across the top, or sidebar |
+| `show_sidebar` | bool | `true` | With the sidebar layout |
+| `glass_sidebar` | bool | `false` | Let the blur show through the sidebar |
 | `cursor_shape` | `"block"` \| `"bar"` \| `"underline"` | `"block"` | |
 | `scrollback_lines` | number | `10000` | Applies to panes opened afterwards |
 | `paste_images` | bool | `true` | `ctrl-v` writes a clipboard image to a file |
 | `shift_enter_newline` | bool | `true` | Send `ESC CR` for `shift-enter` |
+| `copy_on_select` | bool | `true` | Copy a selection as soon as it is made |
 
 ## Themes
 
@@ -191,18 +219,22 @@ chrome on the theme's own surfaces, so the tab strip stays readable.
 
 ## Architecture
 
-The grid is drawn as one styled text element per row, with per-cell colors and
+The grid is drawn as styled text, row by row, with per-cell colors and
 attributes applied as text highlights, which keeps the terminal inside GPUI's
-normal layout and paint path rather than beside it. Emulation runs on its own
+normal layout and paint path rather than beside it. Each row is split into
+segments sized in whole cells — runs of ASCII, and runs of anything else — so a
+glyph from a fallback font can't shift the columns after it. Emulation runs on its own
 thread — `alacritty_terminal` owns the PTY and the parser — and reaches the UI
 thread over a channel, so a program flooding stdout can't stall the window.
 
 ```
 crates/botttle/src
-├── main.rs            window setup and app wiring
-├── workspace.rs       root view: titlebar, tab bar, status bar, actions
+├── main.rs            window setup, cascading, and app wiring
+├── workspace.rs       root view: titlebar, tabs and sidebar, renaming, actions
 ├── pane.rs            the pane tree — split, close, collapse, render
 ├── actions.rs         actions and their default key bindings
+├── menus.rs           the macOS menu bar and Dock menu
+├── glass.rs           window transparency and blur
 ├── settings.rs        user settings, persisted as JSON
 ├── settings_view.rs   the settings screen
 ├── assets.rs          the logo, compiled into the binary
@@ -211,7 +243,8 @@ crates/botttle/src
     ├── mod.rs         PTY + emulator, and the bridge to the main thread
     ├── view.rs        grid rendering, keyboard, mouse, selection, links
     ├── keys.rs        keystrokes to terminal byte sequences
-    ├── hyperlink.rs   finding the URL or path under the pointer
+    ├── hyperlink.rs   finding the URL or path under the pointer, and OSC 8 links
+    ├── shell.rs       the login shell, and quoting paths for it
     ├── image_paste.rs clipboard images to files on disk
     ├── cwd.rs         where a new pane starts
     └── color.rs       ANSI colors to GPUI colors
@@ -226,7 +259,7 @@ cargo clippy --all-targets
 scripts/bundle-macos.sh --debug   # a .app around the debug binary
 ```
 
-The test suite covers key encoding, link detection, theme resolution, settings
+The test suite covers key encoding, link detection, row layout, theme resolution, settings
 round-trips, and working-directory lookup, and includes an end-to-end check that
 a real shell's output reaches the grid we render from.
 

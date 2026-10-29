@@ -8,7 +8,7 @@ mod palettes;
 
 pub use palettes::{Palette, PALETTES};
 
-use gpui::{px, App, Global, Hsla, Pixels, Rgba, SharedString};
+use gpui::{px, App, FontFallbacks, Global, Hsla, Pixels, Rgba, SharedString};
 
 use crate::settings::Settings;
 
@@ -110,6 +110,8 @@ pub struct Theme {
     pub ansi: [Hsla; 16],
 
     pub font_family: SharedString,
+    /// Where glyphs the terminal font lacks are looked for first.
+    pub font_fallbacks: Option<FontFallbacks>,
     pub ui_font_family: SharedString,
     pub font_size: Pixels,
     pub ui_font_size: Pixels,
@@ -157,6 +159,7 @@ impl Theme {
             selection: color(palette.selection),
             ansi: palette.ansi.map(color),
             font_family: fonts.resolve_monospace(settings.terminal_font_family.as_deref()),
+            font_fallbacks: fonts.symbol_fallbacks.clone(),
             ui_font_family: fonts.resolve_ui(settings.ui_font_family.as_deref()),
             font_size: px(settings.terminal_font_size.clamp(6.0, 40.0)),
             ui_font_size: px(settings.ui_font_size.clamp(8.0, 24.0)),
@@ -209,6 +212,8 @@ pub struct FontCatalog {
     pub monospace: Vec<SharedString>,
     default_monospace: SharedString,
     default_ui: SharedString,
+    /// An installed Nerd Font, for the icons prompts and editors draw.
+    symbol_fallbacks: Option<FontFallbacks>,
 }
 
 impl Global for FontCatalog {}
@@ -245,11 +250,15 @@ impl FontCatalog {
             default_monospace.clone()
         };
 
+        let symbol_fallbacks =
+            symbol_font(&all).map(|family| FontFallbacks::from_fonts(vec![family.to_string()]));
+
         Self {
             all,
             monospace,
             default_monospace,
             default_ui,
+            symbol_fallbacks,
         }
     }
 
@@ -281,6 +290,18 @@ impl FontCatalog {
             })
             .unwrap_or_else(|| fallback.clone())
     }
+}
+
+/// The Nerd Font to take icons from: the symbols-only one made for exactly
+/// this when it is installed, otherwise any single-width ("Mono") Nerd Font,
+/// whose icons fit a terminal cell.
+fn symbol_font(installed: &[SharedString]) -> Option<&SharedString> {
+    let find =
+        |predicate: &dyn Fn(&str) -> bool| installed.iter().find(|name| predicate(name.as_ref()));
+    find(&|name| name == "Symbols Nerd Font Mono")
+        .or_else(|| find(&|name| name == "Symbols Nerd Font"))
+        .or_else(|| find(&|name| name.ends_with("Nerd Font Mono")))
+        .or_else(|| find(&|name| name.contains("Nerd Font")))
 }
 
 fn is_monospace_name(name: &str) -> bool {
