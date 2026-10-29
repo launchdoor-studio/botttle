@@ -15,6 +15,10 @@
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license" />
 </p>
 
+<p align="center">
+  <img src="./assets/screenshot.png" alt="botttle with OpenCode and Claude Code side by side in split panes" width="100%" />
+</p>
+
 ---
 
 ## About
