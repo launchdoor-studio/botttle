@@ -123,6 +123,8 @@ pub struct Settings {
     /// Send `ESC CR` for shift-enter so programs can tell it apart from enter.
     /// Turn off to send the plain carriage return terminals have always sent.
     pub shift_enter_newline: bool,
+    /// Copy text to the clipboard as soon as it is selected, without cmd-c.
+    pub copy_on_select: bool,
 }
 
 impl Global for Settings {}
@@ -149,6 +151,7 @@ impl Default for Settings {
             scrollback_lines: DEFAULT_SCROLLBACK,
             paste_images: true,
             shift_enter_newline: true,
+            copy_on_select: true,
         }
     }
 }

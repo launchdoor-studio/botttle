@@ -22,7 +22,8 @@ use gpui::{
     EventEmitter, ExternalPaths, FocusHandle, Focusable, FontFeatures, FontStyle, FontWeight,
     HighlightStyle, Image, KeyDownEvent, Modifiers, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point as GpuiPoint, Render, ScrollDelta,
-    ScrollWheelEvent, SharedString, StrikethroughStyle, StyledText, Task, UnderlineStyle, Window,
+    ScrollWheelEvent, SharedString, StrikethroughStyle, StyledText, Task, TouchPhase,
+    UnderlineStyle, Window,
 };
 
 use crate::settings::{CursorShape as CursorShapeSetting, Settings};
@@ -37,6 +38,10 @@ use crate::theme::Theme;
 
 /// Lines scrolled per wheel notch when the platform reports discrete steps.
 const LINES_PER_SCROLL_NOTCH: f32 = 3.0;
+/// The scrollbar thumb: thin enough to stay out of the way of the last column,
+/// and never so short that it can't be seen at the top of a long history.
+const SCROLLBAR_WIDTH: f32 = 4.0;
+const SCROLLBAR_MIN_THUMB: f32 = 16.0;
 
 /// Things the workspace cares about: they change what the tab strip shows.
 #[derive(Clone, Debug)]
@@ -52,6 +57,11 @@ pub struct TerminalView {
     content_bounds: Bounds<Pixels>,
     /// The scrollback offset of the last painted frame, for the same reason.
     display_offset: usize,
+    /// How many lines of history sit above the screen, for the scrollbar.
+    history_size: usize,
+    /// The part of a line that trackpad scrolling has moved but not yet
+    /// scrolled, so slow, smooth gestures add up instead of rounding to nothing.
+    scroll_remainder: f32,
     selecting: bool,
     /// The link under the pointer while the command key is held, as the display
     /// cells to underline plus what a click would open.
@@ -96,6 +106,8 @@ impl TerminalView {
             focus_handle: cx.focus_handle(),
             content_bounds: Bounds::default(),
             display_offset: 0,
+            history_size: 0,
+            scroll_remainder: 0.0,
             selecting: false,
             hovered_link: None,
             last_mouse_position: None,
@@ -268,6 +280,12 @@ impl TerminalView {
         }
 
         let mode = *self.terminal.lock().mode();
+        if self.scroll_by_key(&event.keystroke, mode) {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
         let shift_enter_newline = cx.global::<Settings>().shift_enter_newline;
         let Some(bytes) = keys::to_bytes(&event.keystroke, mode, shift_enter_newline) else {
             return;
@@ -279,20 +297,75 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Shift with page up, page down, home or end moves through the scrollback,
+    /// the way it does in most terminals. Full-screen programs have no
+    /// scrollback, so on the alternate screen the keys go to them instead.
+    fn scroll_by_key(&mut self, keystroke: &gpui::Keystroke, mode: TermMode) -> bool {
+        let modifiers = keystroke.modifiers;
+        if !modifiers.shift
+            || modifiers.control
+            || modifiers.alt
+            || modifiers.platform
+            || mode.contains(TermMode::ALT_SCREEN)
+        {
+            return false;
+        }
+
+        let page = self.terminal.size().lines().saturating_sub(1).max(1) as i32;
+        match keystroke.key.as_str() {
+            "pageup" => self.terminal.scroll(page),
+            "pagedown" => self.terminal.scroll(-page),
+            "home" => self.terminal.scroll_to_top(),
+            "end" => self.terminal.scroll_to_bottom(),
+            _ => return false,
+        }
+        true
+    }
+
     fn on_scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let line_height = self.terminal.size().line_height;
-        let lines = match event.delta {
-            ScrollDelta::Lines(delta) => delta.y,
-            ScrollDelta::Pixels(delta) => f32::from(delta.y) / f32::from(line_height).max(1.0),
-        };
+        if matches!(event.touch_phase, TouchPhase::Started) {
+            self.scroll_remainder = 0.0;
+        }
 
-        let lines = (lines * LINES_PER_SCROLL_NOTCH).round() as i32;
-        if lines != 0 {
+        let line_height = f32::from(self.terminal.size().line_height).max(1.0);
+        self.scroll_remainder += match event.delta {
+            ScrollDelta::Lines(delta) => delta.y * LINES_PER_SCROLL_NOTCH,
+            ScrollDelta::Pixels(delta) => f32::from(delta.y) / line_height,
+        };
+        let lines = self.scroll_remainder.trunc();
+        self.scroll_remainder -= lines;
+        let lines = lines as i32;
+        if lines == 0 {
+            return;
+        }
+
+        // Programs that track the mouse get the wheel as mouse events, and
+        // full-screen ones without mouse support get it as arrow keys, so
+        // scrolling works in less, vim, and coding agents alike. Shift
+        // overrides both and always scrolls our own history.
+        let mode = *self.terminal.lock().mode();
+        if !event.modifiers.shift && mode.intersects(TermMode::MOUSE_MODE) {
+            let (row, column) = self.clamped_cell(event.position);
+            let report = mouse_wheel_report(lines > 0, row, column, event.modifiers, mode);
+            self.terminal
+                .write(report.repeat(lines.unsigned_abs() as usize));
+        } else if !event.modifiers.shift
+            && mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
+        {
+            let arrow: &[u8] = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
+                (true, true) => b"\x1bOA",
+                (true, false) => b"\x1b[A",
+                (false, true) => b"\x1bOB",
+                (false, false) => b"\x1b[B",
+            };
+            self.terminal
+                .write(arrow.repeat(lines.unsigned_abs() as usize));
+        } else {
             self.terminal.scroll(lines);
             cx.notify();
         }
@@ -350,8 +423,15 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
-        self.selecting = false;
+    /// Ends a selection, also when the button comes up outside the pane, and
+    /// copies it straight away when copy-on-select is on.
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.selecting) {
+            return;
+        }
+        if cx.global::<Settings>().copy_on_select {
+            self.copy(cx);
+        }
     }
 
     fn on_modifiers_changed(
@@ -394,9 +474,13 @@ impl TerminalView {
         true
     }
 
-    /// The link under a window position, if there is one.
+    /// The link under a window position, if there is one: a link the program
+    /// attached to the text first, then one recognised in the text itself.
     fn link_at(&self, position: GpuiPoint<Pixels>) -> Option<HoveredLink> {
         let (row, column) = self.display_cell(position)?;
+        if let Some(link) = self.explicit_link_at(row, column) {
+            return Some(link);
+        }
         let line = self.logical_line(row)?;
         let index = line.cells.iter().position(|cell| *cell == (row, column))?;
 
@@ -426,6 +510,44 @@ impl TerminalView {
         })
     }
 
+    /// An OSC 8 hyperlink at a display cell. Its extent is every neighbouring
+    /// cell carrying the same link, which may run across several rows.
+    fn explicit_link_at(&self, row: usize, column: usize) -> Option<HoveredLink> {
+        let term = self.terminal.lock();
+        let columns = term.columns();
+        let screen_lines = term.screen_lines();
+        let offset = self.display_offset as i32;
+        let link_at = |row: usize, column: usize| {
+            term.grid()[Line(row as i32 - offset)][Column(column)].hyperlink()
+        };
+
+        let link = link_at(row, column)?;
+        let target = hyperlink::from_uri(link.uri())?;
+
+        // Walk the screen as one long run of cells in both directions.
+        let index = row * columns + column;
+        let same = |index: usize| link_at(index / columns, index % columns).as_ref() == Some(&link);
+        let mut first = index;
+        while first > 0 && same(first - 1) {
+            first -= 1;
+        }
+        let mut last = index;
+        while last + 1 < screen_lines * columns && same(last + 1) {
+            last += 1;
+        }
+
+        let mut cells: Vec<(usize, Range<usize>)> = Vec::new();
+        for index in first..=last {
+            let (row, column) = (index / columns, index % columns);
+            match cells.last_mut() {
+                Some((last_row, span)) if *last_row == row => span.end = column + 1,
+                _ => cells.push((row, column..column + 1)),
+            }
+        }
+
+        Some(HoveredLink { cells, target })
+    }
+
     /// The display row and column a window position falls in.
     fn display_cell(&self, position: GpuiPoint<Pixels>) -> Option<(usize, usize)> {
         let size = self.terminal.size();
@@ -439,6 +561,20 @@ impl TerminalView {
         let row = (relative_y / f32::from(size.line_height).max(1.0)).floor() as usize;
 
         (row < size.lines() && column < size.columns()).then_some((row, column))
+    }
+
+    /// The cell under a window position, pulled onto the grid when the pointer
+    /// is over the pane's padding.
+    fn clamped_cell(&self, position: GpuiPoint<Pixels>) -> (usize, usize) {
+        let size = self.terminal.size();
+        let relative_x = f32::from(position.x - self.content_bounds.origin.x).max(0.0);
+        let relative_y = f32::from(position.y - self.content_bounds.origin.y).max(0.0);
+        let column = (relative_x / f32::from(size.cell_width).max(1.0)) as usize;
+        let row = (relative_y / f32::from(size.line_height).max(1.0)) as usize;
+        (
+            row.min(size.lines().saturating_sub(1)),
+            column.min(size.columns().saturating_sub(1)),
+        )
     }
 
     /// The text a row belongs to, following the emulator's wrap markers so a
@@ -538,8 +674,9 @@ impl TerminalView {
             .map(|link| link.cells.clone())
             .unwrap_or_default();
 
-        let (rows, cursor, display_offset) = {
+        let (rows, cursor, display_offset, history_size) = {
             let term = self.terminal.lock();
+            let history_size = term.history_size();
             let columns = term.columns();
             let screen_lines = term.screen_lines();
             let content = term.renderable_content();
@@ -638,14 +775,42 @@ impl TerminalView {
                     column: cursor_column,
                 });
 
-            (rows, cursor, display_offset)
+            (rows, cursor, display_offset, history_size)
         };
 
         self.display_offset = display_offset.max(0) as usize;
+        self.history_size = history_size;
         Grid {
             rows: rows.into_iter().map(RowBuilder::finish).collect(),
             cursor,
         }
+    }
+
+    /// A thumb along the right edge while the view is scrolled back, showing
+    /// where in the history it is. At the bottom there is nothing to say, so
+    /// it stays hidden and out of the way of the live output.
+    fn render_scrollbar(&self, theme: &Theme, height: Pixels) -> Option<gpui::Div> {
+        if self.display_offset == 0 || self.history_size == 0 {
+            return None;
+        }
+
+        let screen_lines = self.terminal.size().lines();
+        let total = (self.history_size + screen_lines) as f32;
+        let height = f32::from(height);
+        let thumb = (height * screen_lines as f32 / total).max(SCROLLBAR_MIN_THUMB);
+        let lines_above = self.history_size.saturating_sub(self.display_offset) as f32;
+        let top = ((height - thumb) * lines_above / self.history_size as f32).max(0.0);
+
+        Some(
+            div()
+                .absolute()
+                .right_0()
+                .top(px(top))
+                .w(px(SCROLLBAR_WIDTH))
+                .h(px(thumb))
+                .rounded(px(SCROLLBAR_WIDTH / 2.0))
+                .bg(theme.text_muted.opacity(0.5)),
+        )
     }
 
     /// The cursor drawn on top of the text, for every case the block-in-text
@@ -725,6 +890,7 @@ impl Render for TerminalView {
                 line_height,
             )
         });
+        let scrollbar = self.render_scrollbar(&theme, self.content_bounds.size.height);
         let entity = cx.entity().downgrade();
 
         let mut root = div()
@@ -745,6 +911,7 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_drop(cx.listener(Self::on_drop_paths))
             // A tint while files are over the pane, so it is clear which one
@@ -794,7 +961,8 @@ impl Render for TerminalView {
                         .h(line_height)
                         .child(StyledText::new(row.text).with_highlights(row.highlights))
                 }))
-                .children(cursor),
+                .children(cursor)
+                .children(scrollbar),
         )
     }
 }
@@ -865,6 +1033,43 @@ fn clipboard_image(item: gpui::ClipboardItem) -> Option<Image> {
         ClipboardEntry::Image(image) => Some(image),
         ClipboardEntry::String(_) => None,
     })
+}
+
+/// One wheel step as a mouse report, in SGR form when the program asked for
+/// it and the legacy byte encoding otherwise. Rows and columns are zero-based.
+fn mouse_wheel_report(
+    up: bool,
+    row: usize,
+    column: usize,
+    modifiers: Modifiers,
+    mode: TermMode,
+) -> Vec<u8> {
+    let mut button: u32 = if up { 64 } else { 65 };
+    if modifiers.shift {
+        button += 4;
+    }
+    if modifiers.alt {
+        button += 8;
+    }
+    if modifiers.control {
+        button += 16;
+    }
+
+    if mode.contains(TermMode::SGR_MOUSE) {
+        format!("\x1b[<{button};{};{}M", column + 1, row + 1).into_bytes()
+    } else {
+        // Each value travels as one byte offset by 32, so positions past 223
+        // can't be expressed and are pinned to the last one that can.
+        let encode = |value: usize| (32 + 1 + value).min(255) as u8;
+        vec![
+            0x1b,
+            b'[',
+            b'M',
+            32 + button as u8,
+            encode(column),
+            encode(row),
+        ]
+    }
 }
 
 fn is_ctrl_v(keystroke: &gpui::Keystroke) -> bool {

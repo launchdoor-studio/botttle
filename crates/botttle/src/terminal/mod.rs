@@ -227,6 +227,10 @@ impl Terminal {
         }
     }
 
+    pub fn scroll_to_top(&self) {
+        self.term.lock().scroll_display(Scroll::Top);
+    }
+
     pub fn scroll_to_bottom(&self) {
         self.term.lock().scroll_display(Scroll::Bottom);
     }

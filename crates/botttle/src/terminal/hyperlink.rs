@@ -33,6 +33,45 @@ pub struct Detection {
     pub target: Target,
 }
 
+/// The target of an explicit hyperlink, the kind programs attach to text with
+/// OSC 8. The visible text can be anything, so only the URI is judged, by the
+/// same rules as a link found in the text: a known scheme, and for `file://`
+/// a path that exists.
+pub fn from_uri(uri: &str) -> Option<Target> {
+    let lowercase = uri.to_lowercase();
+    if lowercase.starts_with("file://") {
+        // `file://host/path`: the host is this machine (or empty), and what
+        // follows it is the path, percent-encoded.
+        let rest = &uri["file://".len()..];
+        let path = &rest[rest.find('/')?..];
+        let path = PathBuf::from(percent_decode(path)?);
+        return path.exists().then_some(Target::Path(path));
+    }
+    SCHEMES
+        .iter()
+        .any(|scheme| lowercase.starts_with(scheme))
+        .then(|| Target::Url(uri.to_string()))
+}
+
+/// Undoes `%XX` escapes. Malformed escapes or non-UTF-8 results give nothing
+/// rather than a path that is subtly wrong.
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(index + 1..index + 3)?).ok()?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
 /// Looks for a target at `index` in a line of terminal text.
 ///
 /// `home` and `working_directory` resolve `~` and relative paths; without them
@@ -235,6 +274,28 @@ mod tests {
         let detection = detect(&chars("open notes.md now"), 6, Some(&directory), None);
         assert_eq!(detection.unwrap().target, Target::Path(file));
 
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn an_explicit_link_is_judged_by_its_uri() {
+        assert_eq!(
+            from_uri("https://example.com/a"),
+            Some(Target::Url("https://example.com/a".into()))
+        );
+        assert_eq!(from_uri("vscode://open?x"), None);
+    }
+
+    #[test]
+    fn a_file_uri_becomes_a_decoded_path() {
+        let directory = std::env::temp_dir().join("botttle hyperlink uri");
+        std::fs::create_dir_all(&directory).expect("dir");
+        let uri = format!(
+            "file://localhost{}",
+            directory.display().to_string().replace(' ', "%20")
+        );
+        assert_eq!(from_uri(&uri), Some(Target::Path(directory.clone())));
+        assert_eq!(from_uri("file:///botttle/does/not/exist"), None);
         std::fs::remove_dir_all(&directory).ok();
     }
 

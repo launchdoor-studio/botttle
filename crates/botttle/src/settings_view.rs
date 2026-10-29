@@ -576,6 +576,26 @@ impl SettingsView {
                 },
             ))
             .child(section_header(
+                "Copy on select",
+                "Selecting text copies it to the clipboard, without cmd-c",
+                theme,
+            ))
+            .child(chip(
+                "chip-copy-on-select",
+                if settings.copy_on_select {
+                    "On"
+                } else {
+                    "Off — copy with cmd-c"
+                },
+                settings.copy_on_select,
+                theme,
+                |_, _, cx| {
+                    Settings::update(cx, |settings| {
+                        settings.copy_on_select = !settings.copy_on_select
+                    })
+                },
+            ))
+            .child(section_header(
                 "Scrollback",
                 "Lines kept per pane. Applies to panes opened from now on.",
                 theme,

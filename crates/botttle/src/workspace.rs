@@ -6,9 +6,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gpui::{
-    div, img, point, prelude::*, px, svg, Axis, Context, Entity, EntityId, FocusHandle, Focusable,
-    MouseButton, MouseDownEvent, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
-    Subscription, Window,
+    div, img, point, prelude::*, px, svg, Axis, ClickEvent, Context, Entity, EntityId, FocusHandle,
+    Focusable, KeyDownEvent, MouseButton, MouseDownEvent, Render, ScrollDelta, ScrollHandle,
+    ScrollWheelEvent, SharedString, Subscription, Window,
 };
 
 use crate::actions::*;
@@ -47,6 +47,16 @@ const AFTER_TRAFFIC_LIGHTS: f32 = 10.0;
 /// beside them follow it rather than the bar. Measured, not derived.
 const TRAFFIC_LIGHT_NUDGE: f32 = 1.75;
 const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
+/// The in-place editor for a tab's name. Only the end of the text is
+/// editable, which is all a name this short needs.
+struct Rename {
+    index: usize,
+    text: String,
+    focus_handle: FocusHandle,
+    /// Clicking away keeps what was typed, the way renaming a file does.
+    _blur: Subscription,
+}
+
 /// Wheel notches to pixels when translating vertical scroll into tab movement.
 const TAB_SCROLL_STEP: f32 = 40.0;
 
@@ -64,9 +74,14 @@ pub struct Workspace {
     status: Option<SharedString>,
     /// The sidebar row under the pointer, which shows its close button.
     hovered_tab: Option<usize>,
+    /// The tab whose name is being edited in place, if any.
+    renaming: Option<Rename>,
 }
 
 struct Tab {
+    /// A name the user gave the tab. While set, it is shown instead of the
+    /// focused pane's title, which programs change as they please.
+    name: Option<SharedString>,
     group: PaneGroup,
     active_pane: EntityId,
     /// Per pane: title/exit notifications, and focus tracking so clicking a pane
@@ -85,6 +100,7 @@ impl Workspace {
             settings_subscription: None,
             status: None,
             hovered_tab: None,
+            renaming: None,
         };
         workspace.open_tab(window, cx);
         workspace
@@ -99,7 +115,9 @@ impl Workspace {
         let mut map = HashMap::new();
         map.insert(pane.entity_id(), subscriptions);
 
+        self.finish_rename(true, cx);
         self.tabs.push(Tab {
+            name: None,
             group: PaneGroup::new(pane.clone()),
             active_pane: pane.entity_id(),
             subscriptions: map,
@@ -222,6 +240,8 @@ impl Workspace {
         if index >= self.tabs.len() {
             return;
         }
+        // Indices shift under an open editor, so it is closed first.
+        self.finish_rename(true, cx);
         self.tabs.remove(index);
 
         // The last tab takes the window with it, but not the app: a mac app
@@ -245,6 +265,170 @@ impl Workspace {
         self.tab_scroll.scroll_to_item(index);
         self.focus_active_pane(window, cx);
         cx.notify();
+    }
+
+    /// Opens the name editor on a tab, starting from what the tab shows now.
+    fn start_rename(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        self.finish_rename(true, cx);
+
+        let text = self.tab_title(&self.tabs[index], cx).to_string();
+        let focus_handle = cx.focus_handle();
+        let blur = cx.on_blur(&focus_handle, window, |this, _, cx| {
+            this.finish_rename(true, cx);
+        });
+        window.focus(&focus_handle);
+        self.renaming = Some(Rename {
+            index,
+            text,
+            focus_handle,
+            _blur: blur,
+        });
+        cx.notify();
+    }
+
+    /// Closes the name editor, keeping the new name when `commit` is set. An
+    /// empty name hands the tab back to its pane's title.
+    fn finish_rename(&mut self, commit: bool, cx: &mut Context<Self>) {
+        let Some(rename) = self.renaming.take() else {
+            return;
+        };
+        if commit {
+            if let Some(tab) = self.tabs.get_mut(rename.index) {
+                let name = rename.text.trim();
+                tab.name = (!name.is_empty()).then(|| SharedString::from(name.to_string()));
+            }
+        }
+        cx.notify();
+    }
+
+    fn on_rename_key_down(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(rename) = self.renaming.as_mut() else {
+            return;
+        };
+        let keystroke = &event.keystroke;
+        let modifiers = keystroke.modifiers;
+
+        match keystroke.key.as_str() {
+            "enter" | "escape" => {
+                let commit = keystroke.key == "enter";
+                self.finish_rename(commit, cx);
+                self.focus_active_pane(window, cx);
+            }
+            "backspace" if modifiers.platform || modifiers.alt => {
+                // Whole words, or everything, as in any other text field.
+                let keep = if modifiers.platform {
+                    0
+                } else {
+                    let trimmed = rename.text.trim_end();
+                    trimmed
+                        .rfind(char::is_whitespace)
+                        .map_or(0, |space| space + 1)
+                };
+                rename.text.truncate(keep);
+            }
+            "backspace" => {
+                rename.text.pop();
+            }
+            _ if modifiers.platform || modifiers.control || modifiers.function => return,
+            _ => {
+                let Some(typed) = keystroke
+                    .key_char
+                    .as_deref()
+                    .filter(|text| !text.is_empty())
+                else {
+                    return;
+                };
+                rename.text.push_str(typed);
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn paste_into_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        if let Some(rename) = self.renaming.as_mut() {
+            // A name is one line.
+            rename
+                .text
+                .push_str(text.lines().next().unwrap_or_default());
+            cx.notify();
+        }
+    }
+
+    /// The editor drawn in place of a tab's title.
+    fn render_rename_field(
+        &self,
+        rename: &Rename,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id("rename-tab")
+            .key_context("TabRename")
+            .track_focus(&rename.focus_handle)
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .overflow_hidden()
+            .px_1()
+            .rounded(px(2.0))
+            .bg(theme.background)
+            .border_1()
+            .border_color(theme.accent)
+            .text_color(theme.text)
+            .on_key_down(cx.listener(Self::on_rename_key_down))
+            .on_action(cx.listener(|this, _: &PasteClipboard, _, cx| this.paste_into_rename(cx)))
+            // Clicks inside the field shouldn't reach the tab underneath.
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex_none()
+                    .child(SharedString::from(rename.text.clone())),
+            )
+            .child(div().flex_none().w(px(1.0)).h(px(14.0)).bg(theme.accent))
+    }
+
+    /// A tab's title wherever it is drawn: the name it was given, or else its
+    /// focused pane's title.
+    fn tab_title(&self, tab: &Tab, cx: &Context<Self>) -> SharedString {
+        if let Some(name) = &tab.name {
+            return name.clone();
+        }
+        let panes = tab.group.panes();
+        panes
+            .iter()
+            .find(|pane| pane.entity_id() == tab.active_pane)
+            .or_else(|| panes.first())
+            .map(|pane| pane.read(cx).title())
+            .unwrap_or_else(|| SharedString::from("shell"))
+    }
+
+    /// Single clicks select a tab; a double click also starts renaming it.
+    fn on_tab_click(
+        &mut self,
+        index: usize,
+        event: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.click_count() >= 2 {
+            self.activate_tab(index, window, cx);
+            self.start_rename(index, window, cx);
+        } else {
+            self.activate_tab(index, window, cx);
+        }
     }
 
     pub fn focus_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -412,9 +596,7 @@ impl Workspace {
             .iter()
             .find(|pane| pane.entity_id() == tab.active_pane)
             .or_else(|| panes.first());
-        let title = focused_pane
-            .map(|pane| pane.read(cx).title())
-            .unwrap_or_else(|| SharedString::from("shell"));
+        let title = self.tab_title(tab, cx);
         let exited = focused_pane.is_some_and(|pane| pane.read(cx).has_exited());
         let dot = if exited {
             theme.danger
@@ -457,7 +639,12 @@ impl Workspace {
                         .child(format!("{pane_count}")),
                 )
             })
-            .child(div().flex_1().min_w_0().truncate().child(title))
+            .map(|element| match self.renaming.as_ref() {
+                Some(rename) if rename.index == index => {
+                    element.child(self.render_rename_field(rename, theme, cx))
+                }
+                _ => element.child(div().flex_1().min_w_0().truncate().child(title)),
+            })
             .when(is_active, |element| {
                 element.bg(theme.elevated).text_color(theme.text)
             })
@@ -466,7 +653,9 @@ impl Workspace {
                     .text_color(theme.text_muted)
                     .hover(|style| style.bg(theme.elevated))
             })
-            .on_click(cx.listener(move |this, _, window, cx| this.activate_tab(index, window, cx)))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.on_tab_click(index, event, window, cx)
+            }))
             .child(
                 div()
                     .id(("close-tab", index))
@@ -602,7 +791,12 @@ impl Workspace {
             .rounded(Theme::radius())
             .cursor_pointer()
             .child(div().size(px(6.0)).flex_none().rounded(px(3.0)).bg(dot))
-            .child(div().flex_1().min_w_0().truncate().child(title))
+            .map(|element| match self.renaming.as_ref() {
+                Some(rename) if rename.index == index => {
+                    element.child(self.render_rename_field(rename, theme, cx))
+                }
+                _ => element.child(div().flex_1().min_w_0().truncate().child(title)),
+            })
             .when(pane_count > 1, |element| {
                 element.child(
                     div()
@@ -620,7 +814,9 @@ impl Workspace {
                     .text_color(theme.text_muted)
                     .hover(|style| style.bg(theme.elevated))
             })
-            .on_click(cx.listener(move |this, _, window, cx| this.activate_tab(index, window, cx)))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.on_tab_click(index, event, window, cx)
+            }))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 let before = this.hovered_tab;
                 if *hovered {
@@ -753,6 +949,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &NewTab, window, cx| this.open_tab(window, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 this.close_tab(this.active_tab, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &RenameTab, window, cx| {
+                this.start_rename(this.active_tab, window, cx)
             }))
             .on_action(cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(1, window, cx)))
             .on_action(

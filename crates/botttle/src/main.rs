@@ -18,16 +18,22 @@ mod workspace;
 
 use anyhow::Result;
 use gpui::{
-    point, px, size, App, AppContext, Application, Bounds, TitlebarOptions, WindowBounds,
+    point, px, size, App, AppContext, Application, Bounds, Pixels, TitlebarOptions, WindowBounds,
     WindowHandle, WindowOptions,
 };
+
+/// How far each new window steps down and right from the one before it, so it
+/// lands visibly beside the current window instead of exactly on top of it.
+const WINDOW_CASCADE: f32 = 28.0;
 
 use crate::settings::{Settings, TabLayout};
 use crate::workspace::Workspace;
 
 fn main() {
-    // Sets TERM and COLORTERM for every shell we spawn.
+    // Sets TERM and COLORTERM for every shell we spawn, and makes sure the
+    // shell is the one the user chose, before any thread can read the env.
     alacritty_terminal::tty::setup_env();
+    terminal::shell::use_login_shell();
 
     let app = Application::new().with_assets(assets::Assets);
 
@@ -85,7 +91,8 @@ fn main() {
 
 /// Opens a window onto a new workspace, and focuses its first pane.
 pub fn open_window(cx: &mut App) -> Result<WindowHandle<Workspace>> {
-    let bounds = Bounds::centered(None, size(px(1120.0), px(720.0)), cx);
+    let bounds = cascaded_bounds(cx)
+        .unwrap_or_else(|| Bounds::centered(None, size(px(1120.0), px(720.0)), cx));
     let background = cx.global::<Settings>().window_background();
 
     let window = cx.open_window(
@@ -114,4 +121,33 @@ pub fn open_window(cx: &mut App) -> Result<WindowHandle<Workspace>> {
         .ok();
 
     Ok(window)
+}
+
+/// The current window's size, stepped down and right of it. Nothing when there
+/// is no window to step from, or when the step would run off the screen it is
+/// on, in which case the new window starts centred again.
+fn cascaded_bounds(cx: &mut App) -> Option<Bounds<Pixels>> {
+    let (current, screen) = cx
+        .active_window()
+        .or_else(|| cx.windows().last().copied())?
+        .update(cx, |_, window, cx| {
+            let screen = window.display(cx).map(|display| display.bounds());
+            (window.bounds(), screen)
+        })
+        .ok()?;
+
+    let step = px(WINDOW_CASCADE);
+    let bounds = Bounds::new(
+        point(current.origin.x + step, current.origin.y + step),
+        current.size,
+    );
+    match screen {
+        Some(screen)
+            if bounds.bottom_right().x > screen.bottom_right().x
+                || bounds.bottom_right().y > screen.bottom_right().y =>
+        {
+            None
+        }
+        _ => Some(bounds),
+    }
 }

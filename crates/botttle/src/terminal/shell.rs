@@ -1,6 +1,52 @@
-//! Turning things into shell input.
+//! Choosing the user's shell, and turning things into shell input.
 
+use std::ffi::CStr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+
+/// Points `SHELL` at the login shell from the user's account, so every pane
+/// starts the shell the user chose.
+///
+/// The emulator takes `SHELL` over the account record, and an app started
+/// from the Dock inherits `SHELL` from when the user logged in. After a
+/// `chsh` that value stays stale until the next login, so without this new
+/// panes would keep starting the old shell. Must run before any threads start.
+pub fn use_login_shell() {
+    if let Some(shell) = login_shell() {
+        std::env::set_var("SHELL", shell);
+    }
+}
+
+/// The shell set for this user in the account database, if it can be run.
+fn login_shell() -> Option<String> {
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buffer = vec![0 as libc::c_char; 4096];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+
+    // SAFETY: every pointer refers to memory owned by this frame, sized as
+    // passed, and the strings in `entry` point into `buffer`, which outlives
+    // the reads below.
+    let status = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            &mut entry,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if status != 0 || result.is_null() || entry.pw_shell.is_null() {
+        return None;
+    }
+
+    let shell = unsafe { CStr::from_ptr(entry.pw_shell) }
+        .to_str()
+        .ok()?
+        .to_string();
+    let executable = std::fs::metadata(&shell)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0);
+    executable.then_some(shell)
+}
 
 /// Renders a path as a single shell word, so a directory with spaces or quotes
 /// in it still arrives at the prompt in one piece.
