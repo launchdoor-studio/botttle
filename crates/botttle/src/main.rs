@@ -12,6 +12,7 @@ mod menus;
 mod pane;
 mod settings;
 mod settings_view;
+mod sound;
 mod terminal;
 mod theme;
 mod workspace;

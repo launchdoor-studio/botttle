@@ -6,6 +6,7 @@
 
 use std::ops::Range;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use alacritty_terminal::event::Event as AlacrittyEvent;
 use alacritty_terminal::grid::Dimensions;
@@ -27,6 +28,7 @@ use gpui::{
 };
 
 use crate::settings::{CursorShape as CursorShapeSetting, Settings};
+use crate::terminal::activity;
 use crate::terminal::color::{self, resolve};
 use crate::terminal::cwd;
 use crate::terminal::hyperlink::{self, Target};
@@ -48,6 +50,7 @@ const SCROLLBAR_MIN_THUMB: f32 = 16.0;
 pub enum TerminalViewEvent {
     TitleChanged,
     Exited,
+    Bell,
 }
 
 pub struct TerminalView {
@@ -125,6 +128,13 @@ impl TerminalView {
 
     pub fn has_exited(&self) -> bool {
         self.terminal.exited
+    }
+
+    /// Whether this pane is busy or has just finished. Meant to be called on a
+    /// steady beat: a finish is reported by exactly one call.
+    pub fn poll_activity(&mut self, now: Instant) -> activity::Status {
+        let at_shell = self.terminal.at_shell();
+        self.terminal.activity.poll(now, at_shell)
     }
 
     pub fn working_directory(&self) -> Option<PathBuf> {
@@ -206,11 +216,11 @@ impl TerminalView {
             .contains(TermMode::BRACKETED_PASTE);
 
         if bracketed {
-            self.terminal.write(b"\x1b[200~".to_vec());
-            self.terminal.write(text.replace('\x1b', "").into_bytes());
-            self.terminal.write(b"\x1b[201~".to_vec());
+            self.terminal.input(b"\x1b[200~".to_vec());
+            self.terminal.input(text.replace('\x1b', "").into_bytes());
+            self.terminal.input(b"\x1b[201~".to_vec());
         } else {
-            self.terminal.write(text.replace("\r\n", "\r").into_bytes());
+            self.terminal.input(text.replace("\r\n", "\r").into_bytes());
         }
         self.terminal.scroll_to_bottom();
         cx.notify();
@@ -218,13 +228,16 @@ impl TerminalView {
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         // Ctrl-L, so the running program decides what "clear" means.
-        self.terminal.write(vec![0x0c]);
+        self.terminal.input(vec![0x0c]);
         cx.notify();
     }
 
     fn handle_event(&mut self, event: AlacrittyEvent, cx: &mut Context<Self>) {
         match event {
-            AlacrittyEvent::Wakeup => cx.notify(),
+            AlacrittyEvent::Wakeup => {
+                self.terminal.activity.output(Instant::now());
+                cx.notify();
+            }
             AlacrittyEvent::Title(title) => {
                 self.terminal.title = Some(title);
                 cx.emit(TerminalViewEvent::TitleChanged);
@@ -264,9 +277,9 @@ impl TerminalView {
                 cx.emit(TerminalViewEvent::Exited);
                 cx.notify();
             }
-            AlacrittyEvent::Bell
-            | AlacrittyEvent::MouseCursorDirty
-            | AlacrittyEvent::CursorBlinkingChange => {}
+            // Agents ring the bell when they want you back.
+            AlacrittyEvent::Bell => cx.emit(TerminalViewEvent::Bell),
+            AlacrittyEvent::MouseCursorDirty | AlacrittyEvent::CursorBlinkingChange => {}
         }
     }
 
@@ -291,7 +304,7 @@ impl TerminalView {
             return;
         };
 
-        self.terminal.write(bytes);
+        self.terminal.input(bytes);
         self.terminal.scroll_to_bottom();
         cx.stop_propagation();
         cx.notify();
@@ -353,7 +366,7 @@ impl TerminalView {
             let (row, column) = self.clamped_cell(event.position);
             let report = mouse_wheel_report(lines > 0, row, column, event.modifiers, mode);
             self.terminal
-                .write(report.repeat(lines.unsigned_abs() as usize));
+                .input(report.repeat(lines.unsigned_abs() as usize));
         } else if !event.modifiers.shift
             && mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
         {
@@ -364,7 +377,7 @@ impl TerminalView {
                 (false, false) => b"\x1b[B",
             };
             self.terminal
-                .write(arrow.repeat(lines.unsigned_abs() as usize));
+                .input(arrow.repeat(lines.unsigned_abs() as usize));
         } else {
             self.terminal.scroll(lines);
             cx.notify();

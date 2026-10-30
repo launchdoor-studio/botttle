@@ -3,6 +3,7 @@
 //!
 //! [`Terminal`] owns no UI. Everything that draws lives in [`crate::terminal::view`].
 
+pub mod activity;
 pub mod color;
 pub mod cwd;
 pub mod hyperlink;
@@ -15,6 +16,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use alacritty_terminal::event::{
     Event as AlacrittyEvent, EventListener, Notify, OnResize, WindowSize,
@@ -122,6 +124,8 @@ pub struct Terminal {
     pub title: Option<String>,
     /// True once the child process is gone. The pane stays open so output can be read.
     pub exited: bool,
+    /// Whether whatever is running is busy, for the tab list.
+    pub activity: activity::Activity,
 }
 
 impl Terminal {
@@ -176,6 +180,7 @@ impl Terminal {
                 master,
                 title: None,
                 exited: false,
+                activity: activity::Activity::default(),
             },
             rx,
         ))
@@ -203,6 +208,26 @@ impl Terminal {
         self.notifier.notify(bytes);
     }
 
+    /// Sends bytes the user typed, pasted or scrolled, so the output they
+    /// cause isn't mistaken for the program working on its own.
+    pub fn input(&mut self, bytes: impl Into<Cow<'static, [u8]>>) {
+        self.activity.input(Instant::now());
+        self.write(bytes);
+    }
+
+    /// Whether the shell has the terminal, rather than a program it started.
+    /// A pane we can't ask about counts as idle, so it never claims to be busy.
+    pub fn at_shell(&self) -> bool {
+        if self.exited {
+            return true;
+        }
+        self.master
+            .as_ref()
+            .and_then(cwd::foreground_process)
+            .and_then(activity::process_name)
+            .is_none_or(|name| activity::is_shell(&name))
+    }
+
     /// Resizes both the emulator's grid and the PTY. A no-op if the cell
     /// dimensions haven't changed, so it is safe to call every frame.
     pub fn resize(&mut self, size: TerminalSize) {
@@ -216,6 +241,8 @@ impl Terminal {
         }
 
         self.size = size;
+        // Full-screen programs redraw on resize, which isn't work either.
+        self.activity.input(Instant::now());
         self.term.lock().resize(size);
         self.notifier.on_resize(size.into());
     }

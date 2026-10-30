@@ -18,6 +18,10 @@ pub const DEFAULT_SCROLLBACK: usize = 10_000;
 /// Below this the text stops being readable over anything busy.
 pub const MIN_OPACITY: f32 = 0.3;
 pub const DEFAULT_BLUR_RADIUS: u32 = 20;
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 220.0;
+/// Narrower than this and tab names are cut to a few letters.
+pub const MIN_SIDEBAR_WIDTH: f32 = 140.0;
+pub const MAX_SIDEBAR_WIDTH: f32 = 480.0;
 pub const MAX_BLUR_RADIUS: u32 = 64;
 
 /// How the cursor is drawn in a focused terminal.
@@ -108,12 +112,10 @@ pub struct Settings {
     /// How far the blur spreads, in points. Higher reads as frostier glass.
     pub blur_radius: u32,
     pub tab_layout: TabLayout,
-    /// Let the sidebar show the blur through it as the panes do, rather than
-    /// sitting on the more solid chrome ground. Only visible when `opacity` is
-    /// below 1.
-    pub glass_sidebar: bool,
     /// Whether the tab sidebar is open. Only meaningful with the sidebar layout.
     pub show_sidebar: bool,
+    /// How wide the tab sidebar is, in points. Set by dragging its edge.
+    pub sidebar_width: f32,
     pub cursor_shape: CursorShape,
     /// Applies to panes opened from now on.
     pub scrollback_lines: usize,
@@ -125,6 +127,10 @@ pub struct Settings {
     pub shift_enter_newline: bool,
     /// Copy text to the clipboard as soon as it is selected, without cmd-c.
     pub copy_on_select: bool,
+    /// Show which tabs are busy and which have finished, in the tab list.
+    pub tab_status: bool,
+    /// Chime when something finishes in a tab you aren't looking at.
+    pub done_sound: bool,
 }
 
 impl Global for Settings {}
@@ -145,13 +151,15 @@ impl Default for Settings {
             blur: false,
             blur_radius: DEFAULT_BLUR_RADIUS,
             tab_layout: TabLayout::Horizontal,
-            glass_sidebar: false,
             show_sidebar: true,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             cursor_shape: CursorShape::Block,
             scrollback_lines: DEFAULT_SCROLLBACK,
             paste_images: true,
             shift_enter_newline: true,
             copy_on_select: true,
+            tab_status: true,
+            done_sound: true,
         }
     }
 }
@@ -204,6 +212,10 @@ impl Settings {
     /// Clamped so the window can never be dragged into invisibility.
     pub fn opacity(&self) -> f32 {
         self.opacity.clamp(MIN_OPACITY, 1.0)
+    }
+
+    pub fn sidebar_width(&self) -> f32 {
+        clamp_sidebar_width(self.sidebar_width)
     }
 
     pub fn is_translucent(&self) -> bool {
@@ -304,6 +316,15 @@ pub fn to_hex(color: Hsla) -> String {
 /// Initializes settings before anything reads the theme.
 pub fn init(cx: &mut App) {
     cx.set_global(Settings::load());
+}
+
+/// Keeps a dragged or hand-edited width within what the sidebar can use.
+pub fn clamp_sidebar_width(width: f32) -> f32 {
+    if width.is_finite() {
+        width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+    } else {
+        DEFAULT_SIDEBAR_WIDTH
+    }
 }
 
 #[cfg(test)]

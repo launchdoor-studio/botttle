@@ -16,9 +16,6 @@ pub const DEFAULT_THEME: &str = "Botttle Dark";
 
 /// One corner radius for the whole app. Kept small on purpose.
 pub const RADIUS: f32 = 4.0;
-/// How opaque a glass sidebar is, relative to the panes' opacity: half as
-/// solid, so it reads as clearly more see-through than they do.
-const GLASS_SIDEBAR_TINT: f32 = 0.5;
 
 /// Monospace families we look for, in order, when the user hasn't chosen one.
 const FONT_CANDIDATES: &[&str] = &[
@@ -83,11 +80,6 @@ pub struct Theme {
     pub background: Hsla,
     pub surface: Hsla,
     pub elevated: Hsla,
-    /// The tab sidebar's ground: the chrome surface, or a light tint of it
-    /// when the sidebar is glass.
-    pub sidebar: Hsla,
-    /// Secondary text in the sidebar: inactive tabs, counts, and controls.
-    pub sidebar_text_muted: Hsla,
     pub border: Hsla,
     pub border_focused: Hsla,
     pub text: Hsla,
@@ -143,8 +135,6 @@ impl Theme {
             background: color(palette.background),
             surface: color(palette.surface),
             elevated: color(palette.elevated),
-            sidebar: color(palette.surface),
-            sidebar_text_muted: color(palette.text_muted),
             border: color(palette.border),
             border_focused: color(palette.border_focused),
             text: color(palette.text),
@@ -184,20 +174,6 @@ impl Theme {
             theme.background = theme.background.alpha(opacity);
             theme.surface = theme.surface.alpha(chrome);
             theme.elevated = theme.elevated.alpha(chrome);
-            // The sidebar paints the only ground beneath it (the window ground
-            // stops at the content column), so this alpha is all there is.
-            // Solid, it matches chrome stacked over the window ground; glass
-            // keeps only a tint of the surface, so the blur shows through it
-            // more than through the panes.
-            theme.sidebar = if settings.glass_sidebar {
-                // Dimmed text disappears against a bright, busy desktop, so
-                // on glass every label is full strength, the way a mac
-                // sidebar's are; the active tab still has its pill and dot.
-                theme.sidebar_text_muted = theme.text;
-                theme.surface.alpha(opacity * GLASS_SIDEBAR_TINT)
-            } else {
-                theme.surface.alpha(1.0 - (1.0 - chrome) * (1.0 - opacity))
-            };
             // The window ground already carries the alpha, so the pane adds none.
             theme.pane_background = theme.terminal_background.alpha(0.0);
         }

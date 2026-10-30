@@ -200,33 +200,6 @@ impl SettingsView {
                     move |_, _, cx| Settings::update(cx, |settings| settings.tab_layout = layout),
                 )
             })))
-            .when(settings.tab_layout == TabLayout::Vertical, |element| {
-                element.child(
-                    div()
-                        .flex()
-                        .gap_4()
-                        .items_center()
-                        .child(chip(
-                            "chip-glass-sidebar",
-                            "Glass sidebar",
-                            settings.glass_sidebar,
-                            theme,
-                            |_, _, cx| {
-                                Settings::update(cx, |settings| {
-                                    settings.glass_sidebar = !settings.glass_sidebar
-                                })
-                            },
-                        ))
-                        .when(!settings.is_translucent(), |element| {
-                            element.child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(theme.text_muted)
-                                    .child("Glass applies once opacity is below 100%"),
-                            )
-                        }),
-                )
-            })
             .child(section_header(
                 "Transparency",
                 "How much of the desktop shows through the window",
@@ -594,6 +567,30 @@ impl SettingsView {
                         settings.copy_on_select = !settings.copy_on_select
                     })
                 },
+            ))
+            .child(section_header(
+                "Task status",
+                "Tabs show when a command or agent is working, and when it's done",
+                theme,
+            ))
+            .child(chip(
+                "chip-tab-status",
+                if settings.tab_status { "On" } else { "Off" },
+                settings.tab_status,
+                theme,
+                |_, _, cx| Settings::update(cx, |settings| settings.tab_status = !settings.tab_status),
+            ))
+            .child(section_header(
+                "Sound when done",
+                "A soft chime when a tab you aren't looking at finishes",
+                theme,
+            ))
+            .child(chip(
+                "chip-done-sound",
+                if settings.done_sound { "On" } else { "Off" },
+                settings.done_sound,
+                theme,
+                |_, _, cx| Settings::update(cx, |settings| settings.done_sound = !settings.done_sound),
             ))
             .child(section_header(
                 "Scrollback",

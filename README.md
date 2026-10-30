@@ -70,9 +70,16 @@ should build — the platform-specific paths are there — but is untested.
 **Workspace**
 
 - Tabs, each holding its own pane layout, in a strip across the top or a
-  collapsible sidebar down the left.
+  collapsible sidebar down the left. Drag the sidebar's edge to resize it;
+  double-click the edge to reset.
 - **Rename a tab** by double-clicking it, `⌘⇧R`, or File → Rename Tab… . A
   name sticks however the program retitles the pane; clear it to go back.
+- **Tabs say when they're done.** A tab whose command or agent is busy shows
+  *Working…*; when it finishes while you're looking elsewhere it shows *Done*
+  and how long ago, until you go back to it. A command finishing is noticed
+  when the shell gets the terminal back; an agent, when it goes quiet after a
+  stretch of output or rings the bell. A soft chime plays as it does; both
+  the status and the chime can be turned off in settings.
 - Multiple windows from `⌘N`, File → New Window, or the Dock icon's menu. Each
   new one steps out from the last instead of landing on top of it.
 - Splits to any depth, with gutters you drag to resize. Splitting along an axis a pane already occupies adds a
@@ -204,12 +211,14 @@ hand — unknown and missing keys fall back to defaults.
 | `blur_radius` | number | `20` | 1–64 points |
 | `tab_layout` | `"horizontal"` \| `"vertical"` | `"horizontal"` | Strip across the top, or sidebar |
 | `show_sidebar` | bool | `true` | With the sidebar layout |
-| `glass_sidebar` | bool | `false` | Let the blur show through the sidebar |
+| `sidebar_width` | number | `220` | 140–480; set by dragging the sidebar's edge |
 | `cursor_shape` | `"block"` \| `"bar"` \| `"underline"` | `"block"` | |
 | `scrollback_lines` | number | `10000` | Applies to panes opened afterwards |
 | `paste_images` | bool | `true` | `ctrl-v` writes a clipboard image to a file |
 | `shift_enter_newline` | bool | `true` | Send `ESC CR` for `shift-enter` |
 | `copy_on_select` | bool | `true` | Copy a selection as soon as it is made |
+| `tab_status` | bool | `true` | Show *Working…* and *Done* on tabs |
+| `done_sound` | bool | `true` | Chime when a tab you aren't looking at finishes |
 
 ## Themes
 
@@ -251,6 +260,7 @@ crates/botttle/src
     ├── shell.rs       the login shell, and quoting paths for it
     ├── image_paste.rs clipboard images to files on disk
     ├── cwd.rs         where a new pane starts
+    ├── activity.rs    whether a pane is busy, and when it has finished
     └── color.rs       ANSI colors to GPUI colors
 ```
 

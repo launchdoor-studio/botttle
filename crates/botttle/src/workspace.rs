@@ -4,18 +4,21 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    div, img, point, prelude::*, px, svg, Axis, ClickEvent, Context, Entity, EntityId, FocusHandle,
-    Focusable, KeyDownEvent, MouseButton, MouseDownEvent, Render, ScrollDelta, ScrollHandle,
-    ScrollWheelEvent, SharedString, Subscription, Window,
+    div, img, point, prelude::*, px, svg, App, Axis, ClickEvent, Context, CursorStyle,
+    DragMoveEvent, Entity, EntityId, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, Render, ScrollDelta, ScrollHandle, ScrollWheelEvent, SharedString,
+    Subscription, Task, Window,
 };
 
 use crate::actions::*;
 use crate::assets;
 use crate::pane::{PaneGroup, RemoveResult, Resize, ResizeHandler};
-use crate::settings::{Settings, TabLayout};
+use crate::settings::{clamp_sidebar_width, Settings, TabLayout, DEFAULT_SIDEBAR_WIDTH};
 use crate::settings_view::{SettingsView, SettingsViewEvent};
+use crate::sound;
 use crate::terminal::view::{TerminalView, TerminalViewEvent};
 use crate::theme::Theme;
 
@@ -32,7 +35,8 @@ const TAB_BAR_HEIGHT: f32 = 36.0;
 /// Tabs keep their width instead of shrinking, so the strip scrolls once it fills.
 const TAB_MIN_WIDTH: f32 = 110.0;
 const TAB_MAX_WIDTH: f32 = 240.0;
-const SIDEBAR_WIDTH: f32 = 220.0;
+/// The strip along the sidebar's edge that drags to resize it.
+const SIDEBAR_HANDLE_WIDTH: f32 = 5.0;
 const ICON_BUTTON_SIZE: f32 = 24.0;
 const ICON_SIZE: f32 = 14.0;
 const CLOSE_BUTTON_SIZE: f32 = 18.0;
@@ -47,6 +51,10 @@ const AFTER_TRAFFIC_LIGHTS: f32 = 10.0;
 /// beside them follow it rather than the bar. Measured, not derived.
 const TRAFFIC_LIGHT_NUDGE: f32 = 1.75;
 const SIDEBAR_ROW_HEIGHT: f32 = 28.0;
+/// A sidebar row with a status line under its title.
+const SIDEBAR_STATUS_ROW_HEIGHT: f32 = 40.0;
+/// How often panes are asked whether they are busy or done.
+const ACTIVITY_POLL: Duration = Duration::from_millis(500);
 /// The in-place editor for a tab's name. Only the end of the text is
 /// editable, which is all a name this short needs.
 struct Rename {
@@ -76,6 +84,23 @@ pub struct Workspace {
     hovered_tab: Option<usize>,
     /// The tab whose name is being edited in place, if any.
     renaming: Option<Rename>,
+    /// Asks every pane, on a steady beat, whether it is busy or done.
+    _activity: Task<()>,
+    /// Followed live while the edge is dragged, and saved once it is dropped,
+    /// so a drag doesn't write the settings file on every mouse move.
+    sidebar_width: f32,
+}
+
+/// What the sidebar's edge carries while it is dragged.
+struct SidebarEdge;
+
+/// The edge itself is the feedback, so nothing follows the pointer.
+struct SidebarEdgePreview;
+
+impl Render for SidebarEdgePreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
 }
 
 struct Tab {
@@ -87,6 +112,11 @@ struct Tab {
     /// Per pane: title/exit notifications, and focus tracking so clicking a pane
     /// makes it the target of the next split or close.
     subscriptions: HashMap<EntityId, Vec<Subscription>>,
+    /// Some pane in the tab is producing output on its own.
+    working: bool,
+    /// Something in the tab finished while nobody was looking at it, and how
+    /// long ago that reads as. Cleared once the tab is looked at.
+    done: Option<(Instant, SharedString)>,
 }
 
 impl Workspace {
@@ -101,6 +131,16 @@ impl Workspace {
             status: None,
             hovered_tab: None,
             renaming: None,
+            sidebar_width: cx.global::<Settings>().sidebar_width(),
+            _activity: cx.spawn_in(window, async move |this, cx| loop {
+                cx.background_executor().timer(ACTIVITY_POLL).await;
+                if this
+                    .update_in(cx, |this, window, cx| this.poll_activity(window, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }),
         };
         workspace.open_tab(window, cx);
         workspace
@@ -121,6 +161,8 @@ impl Workspace {
             group: PaneGroup::new(pane.clone()),
             active_pane: pane.entity_id(),
             subscriptions: map,
+            working: false,
+            done: None,
         });
         self.active_tab = self.tabs.len() - 1;
         self.tab_scroll.scroll_to_item(self.active_tab);
@@ -159,10 +201,15 @@ impl Workspace {
         let focus_handle = pane.focus_handle(cx);
 
         vec![
-            cx.subscribe(pane, |_, _, event: &TerminalViewEvent, cx| match event {
-                // Both change what the tab strip should say.
-                TerminalViewEvent::TitleChanged | TerminalViewEvent::Exited => cx.notify(),
-            }),
+            cx.subscribe_in(
+                pane,
+                window,
+                move |this, _, event, window, cx| match event {
+                    // Both change what the tab strip should say.
+                    TerminalViewEvent::TitleChanged | TerminalViewEvent::Exited => cx.notify(),
+                    TerminalViewEvent::Bell => this.mark_done(id, window, cx),
+                },
+            ),
             // Clicking into a pane focuses it directly, so the workspace learns
             // which pane is current by watching focus rather than clicks.
             cx.on_focus_in(&focus_handle, window, move |this, _, cx| {
@@ -176,6 +223,65 @@ impl Workspace {
         ]
     }
 
+    /// Notes which tabs are busy and which have finished something, so the tab
+    /// list can say where attention is needed.
+    fn poll_activity(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let seen = window.is_window_active().then_some(self.active_tab);
+        let mut changed = false;
+        let mut newly_done = false;
+
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let mut working = false;
+            let mut finished = false;
+            for pane in tab.group.panes() {
+                let status = pane.update(cx, |pane, _| pane.poll_activity(now));
+                working |= status.working;
+                finished |= status.finished;
+            }
+
+            let done = if seen == Some(index) {
+                None
+            } else if finished {
+                newly_done = true;
+                Some(now)
+            } else {
+                tab.done.as_ref().map(|(at, _)| *at)
+            };
+            let done = done.map(|at| (at, age(now.duration_since(at))));
+
+            changed |= working != tab.working || done != tab.done;
+            tab.working = working;
+            tab.done = done;
+        }
+
+        if newly_done {
+            chime(cx);
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// A pane asked for attention. Its tab shows as done unless it is the one
+    /// already being looked at.
+    fn mark_done(&mut self, pane: EntityId, window: &Window, cx: &mut Context<Self>) {
+        let Some(index) = self.tabs.iter().position(|tab| {
+            tab.group
+                .panes()
+                .iter()
+                .any(|candidate| candidate.entity_id() == pane)
+        }) else {
+            return;
+        };
+        if index == self.active_tab && window.is_window_active() {
+            return;
+        }
+        self.tabs[index].done = Some((Instant::now(), age(Duration::ZERO)));
+        chime(cx);
+        cx.notify();
+    }
+
     fn focus_pane(
         &mut self,
         pane: &Entity<TerminalView>,
@@ -184,6 +290,8 @@ impl Workspace {
     ) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             tab.active_pane = pane.entity_id();
+            // Looking at it is the acknowledgement.
+            tab.done = None;
         }
         window.focus(&pane.focus_handle(cx));
         cx.notify();
@@ -598,8 +706,13 @@ impl Workspace {
             .or_else(|| panes.first());
         let title = self.tab_title(tab, cx);
         let exited = focused_pane.is_some_and(|pane| pane.read(cx).has_exited());
+        let show_status = cx.global::<Settings>().tab_status;
         let dot = if exited {
             theme.danger
+        } else if show_status && tab.done.is_some() {
+            theme.ansi[2]
+        } else if show_status && tab.working {
+            theme.ansi[3]
         } else if index == self.active_tab {
             theme.accent
         } else {
@@ -676,11 +789,6 @@ impl Workspace {
     /// a mac sidebar has them. The sidebar's top is the window's only drag
     /// area in this layout; the panes run to the top edge.
     fn render_sidebar(&self, theme: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        // Everything drawn in the sidebar takes its own muted colour.
-        let theme = &Theme {
-            text_muted: theme.sidebar_text_muted,
-            ..theme.clone()
-        };
         let rows = self
             .tabs
             .iter()
@@ -692,9 +800,12 @@ impl Workspace {
             .flex()
             .flex_col()
             .flex_none()
-            .w(px(SIDEBAR_WIDTH))
+            .relative()
+            .w(px(self.sidebar_width))
             .h_full()
-            .bg(theme.sidebar)
+            // The window ground stops at the content column, so the sidebar
+            // paints the same ground itself, transparency and all.
+            .bg(theme.background)
             .border_r_1()
             .border_color(theme.border)
             .child(
@@ -744,6 +855,27 @@ impl Workspace {
                         ),
                     ),
             )
+            .child(
+                // Drag the edge to resize; double-click it to put it back.
+                div()
+                    .id("sidebar-edge")
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .w(px(SIDEBAR_HANDLE_WIDTH))
+                    .cursor(CursorStyle::ResizeLeftRight)
+                    .hover(|style| style.bg(theme.border))
+                    .on_drag(SidebarEdge, |_, _, _, cx| cx.new(|_| SidebarEdgePreview))
+                    .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                        if event.click_count() == 2 {
+                            this.sidebar_width = DEFAULT_SIDEBAR_WIDTH;
+                            Settings::update(cx, |settings| {
+                                settings.sidebar_width = DEFAULT_SIDEBAR_WIDTH
+                            });
+                        }
+                    })),
+            )
     }
 
     /// With the sidebar closed, the traffic lights still need somewhere to sit
@@ -779,6 +911,16 @@ impl Workspace {
         // Only the active row and the one under the pointer offer to close, so
         // a long list of tabs doesn't read as a column of ×s.
         let closable = is_active || self.hovered_tab == Some(index);
+        let status = match &tab.done {
+            _ if !cx.global::<Settings>().tab_status => None,
+            Some((_, age)) => Some(("Done", Some(age.clone()))),
+            None => tab.working.then_some(("Working…", None)),
+        };
+        let height = if status.is_some() {
+            SIDEBAR_STATUS_ROW_HEIGHT
+        } else {
+            SIDEBAR_ROW_HEIGHT
+        };
 
         div()
             .id(("sidebar-tab", index))
@@ -786,7 +928,7 @@ impl Workspace {
             .flex_none()
             .items_center()
             .gap_2()
-            .h(px(SIDEBAR_ROW_HEIGHT))
+            .h(px(height))
             .px_2()
             .rounded(Theme::radius())
             .cursor_pointer()
@@ -795,7 +937,26 @@ impl Workspace {
                 Some(rename) if rename.index == index => {
                     element.child(self.render_rename_field(rename, theme, cx))
                 }
-                _ => element.child(div().flex_1().min_w_0().truncate().child(title)),
+                _ => element.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(div().truncate().child(title))
+                        .when_some(status, |column, (label, age)| {
+                            column.child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .gap_2()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.text_muted)
+                                    .child(label)
+                                    .children(age),
+                            )
+                        }),
+                ),
             })
             .when(pane_count > 1, |element| {
                 element.child(
@@ -1019,9 +1180,22 @@ impl Render for Workspace {
                         .when(show_sidebar, |row| {
                             row.child(self.render_sidebar(&theme, cx))
                         })
+                        // The whole row hears the drag, so the edge keeps
+                        // following the pointer when it runs ahead of it.
+                        .on_drag_move(cx.listener(
+                            |this, event: &DragMoveEvent<SidebarEdge>, _, cx| {
+                                let width = event.event.position.x - event.bounds.origin.x;
+                                this.sidebar_width = clamp_sidebar_width(f32::from(width));
+                                cx.notify();
+                            },
+                        ))
+                        .on_drop(cx.listener(|this, _: &SidebarEdge, _, cx| {
+                            let width = this.sidebar_width;
+                            Settings::update(cx, |settings| settings.sidebar_width = width);
+                        }))
                         .child(
                             // The window ground goes behind the panes only, so a
-                            // glass sidebar isn't stacked on top of it.
+                            // sidebar, which paints its own, isn't doubled up.
                             div()
                                 .flex()
                                 .flex_col()
@@ -1038,6 +1212,24 @@ impl Render for Workspace {
             })
             .children(self.settings.clone())
     }
+}
+
+/// Lets the user know something finished, if they want to hear about it.
+fn chime(cx: &App) {
+    if cx.global::<Settings>().done_sound {
+        sound::play_done();
+    }
+}
+
+/// How long ago something finished, as briefly as a sidebar has room for.
+fn age(elapsed: Duration) -> SharedString {
+    let minutes = elapsed.as_secs() / 60;
+    SharedString::from(match minutes {
+        0 => "now".to_string(),
+        1..60 => format!("{minutes}m"),
+        60..1440 => format!("{}h", minutes / 60),
+        _ => format!("{}d", minutes / 1440),
+    })
 }
 
 /// Icons are line drawings, thinner than text, so the muted text colour that
